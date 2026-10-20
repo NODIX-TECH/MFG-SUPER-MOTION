@@ -17,6 +17,21 @@
             <Button Name="SupportNav" Classes="nav utility" Classes.active="{Binding IsSupport}" Command="{Binding SupportCommand}" AutomationProperties.Name="{Binding Text.Support}">
               <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource SupportIcon}" /><TextBlock Grid.Column="1" Text="{Binding Text.Support}" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
             </Button>
+            <Button Name="MoreNav" Classes="nav utility" Command="{Binding MoreCommand}" AutomationProperties.Name="{Binding Text.NavMore}">
+              <Grid ColumnDefinitions="16,*">
+                <Path Classes="nav-icon" Data="{StaticResource MoreClosedIcon}" IsVisible="{Binding !IsMoreOpen}" />
+                <Path Classes="nav-icon" Data="{StaticResource MoreOpenIcon}" IsVisible="{Binding IsMoreOpen}" />
+                <TextBlock Grid.Column="1" Text="{Binding Text.NavMore}" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" />
+              </Grid>
+            </Button>
+            <StackPanel Name="MoreList" Spacing="4" IsVisible="{Binding IsMoreOpen}" Margin="14,0,0,0">
+              <Button Name="VideoNav" Classes="nav utility" Classes.active="{Binding IsVideo}" Command="{Binding VideoCommand}" AutomationProperties.Name="Super Video">
+                <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource VideoIcon}" /><TextBlock Grid.Column="1" Text="Super Video" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
+              </Button>
+              <Button Name="ModsNav" Classes="nav utility" Classes.active="{Binding IsMods}" Command="{Binding ModsCommand}" AutomationProperties.Name="App Mods">
+                <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource ModsIcon}" /><TextBlock Grid.Column="1" Text="App Mods" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
+              </Button>
+            </StackPanel>
           </StackPanel>
           <Border Grid.Row="1" Height="1" Margin="6,18,6,14" Background="{DynamicResource LineBrush}" />
           <TextBlock Grid.Row="2" Classes="muted" Text="{Binding Text.Profiles}" Margin="10,0,0,10" FontSize="13" />
@@ -86,6 +101,12 @@
                   <TextBlock Classes="row-label" Text="{Binding Text.Mode}" />
                   <ComboBox Classes="row-control" ItemsSource="{Binding Modes}" SelectedIndex="{Binding ModeIndex, Mode=TwoWay}" IsEnabled="{Binding FrameGenerationEnabled}" AutomationProperties.Name="{Binding Text.Mode}" FlowDirection="LeftToRight" />
                 </ui:SettingRow>
+                <ui:SettingRow IsVisible="{Binding IsDlss}">
+                  <TextBlock Classes="row-label" Text="{Binding Text.DlssPreset}" />
+                  <ComboBox Classes="row-control" ItemsSource="{Binding DlssPresets}" SelectedIndex="{Binding DlssPresetIndex, Mode=TwoWay}" IsEnabled="{Binding !IsMotionActive}" AutomationProperties.Name="{Binding Text.DlssPreset}">
+                    <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                  </ComboBox>
+                </ui:SettingRow>
                 <ui:SettingRow>
                   <TextBlock Classes="row-label" Text="{Binding Text.GameType}" />
                   <ComboBox Classes="row-control" ItemsSource="{Binding GameTypes}" SelectedIndex="{Binding GameTypeIndex, Mode=TwoWay}" IsEnabled="{Binding IsMotionPrecisionOpen}" AutomationProperties.Name="{Binding Text.GameType}">
@@ -93,12 +114,23 @@
                   </ComboBox>
                 </ui:SettingRow>
                 <ui:SettingRow>
-                  <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveLearning}" />
+                  <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveLearning}" />
+                    <Button Name="AmlWhatIs" Classes="whatis" Content="?" AutomationProperties.Name="?" />
+                  </StackPanel>
                   <StackPanel Classes="row-control" Orientation="Horizontal" Spacing="12">
                     <TextBlock Name="LearningStatus" Classes="muted" Text="{Binding LearningStatus}" VerticalAlignment="Center" />
                     <ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding AdaptiveLearningEnabled, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.AdaptiveLearning}" />
                   </StackPanel>
                 </ui:SettingRow>
+                <ui:SettingRow>
+                  <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveFlow}" />
+                    <Button Name="AfsWhatIs" Classes="whatis" Content="?" AutomationProperties.Name="?" />
+                  </StackPanel>
+                  <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding AdaptiveFlowEnabled, Mode=TwoWay}" IsEnabled="{Binding IsAdaptiveFlowOpen}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.AdaptiveFlow}" /></Border>
+                </ui:SettingRow>
+
                 <ui:SettingRow>
                   <TextBlock Classes="row-label" Text="{Binding Text.Flow}" />
                   <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
@@ -155,6 +187,12 @@
                           </Grid>
                         </ui:SettingRow>
                         <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.GameFps}" ToolTip.Tip="{Binding Text.GameFpsHelp}" />
+                          <ComboBox Name="GameFpsBox" Classes="row-control" ItemsSource="{Binding GameFpsChoices}" SelectedIndex="{Binding GameFpsIndex, Mode=TwoWay}" ToolTip.Tip="{Binding Text.GameFpsHelp}" AutomationProperties.Name="{Binding Text.GameFps}">
+                            <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                          </ComboBox>
+                        </ui:SettingRow>
+                        <ui:SettingRow>
                           <TextBlock Classes="row-label" Text="{Binding Text.ScreenLimit}" />
                           <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding LimitToScreenEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.ScreenLimit}" /></Border>
                         </ui:SettingRow>
@@ -185,6 +223,10 @@
                           <TextBlock Classes="row-label" Text="{Binding Text.FpsCounter}" />
                           <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding FpsCounterEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.FpsCounter}" /></Border>
                         </ui:SettingRow>
+                        <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.MultiDisplay}" ToolTip.Tip="{Binding Text.MultiDisplayHelp}" />
+                          <Border Classes="row-control"><ToggleButton Name="MultiDisplaySwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding MultiDisplayEnabled, Mode=TwoWay}" HorizontalAlignment="Right" ToolTip.Tip="{Binding Text.MultiDisplayHelp}" AutomationProperties.Name="{Binding Text.MultiDisplay}" /></Border>
+                        </ui:SettingRow>
                       </StackPanel>
                     </Border>
                     <Border Classes="group">
@@ -212,10 +254,7 @@
                           <TextBlock Classes="row-label" Text="{Binding Text.StillPixels}" />
                           <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding StillPixelsEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.StillPixels}" /></Border>
                         </ui:SettingRow>
-                        <ui:SettingRow>
-                          <TextBlock Classes="row-label" Text="{Binding Text.MotionGuard}" />
-                          <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding MotionGuardEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.MotionGuard}" /></Border>
-                        </ui:SettingRow>
+
                       </StackPanel>
                     </Border>
                     <Border Classes="group">
@@ -259,6 +298,39 @@
                       </StackPanel>
                     </Border>
                     <Border Classes="group">
+                      <StackPanel Spacing="8">
+                        <TextBlock Classes="group-title" Text="{Binding Text.CropInput}" ToolTip.Tip="{Binding Text.CropHelp}" />
+                        <Grid ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto,Auto" HorizontalAlignment="Center" Margin="0,2,0,6" FlowDirection="LeftToRight" ToolTip.Tip="{Binding Text.CropHelp}">
+                          <TextBox Name="CropTopBox" Grid.Column="1" Grid.Row="0" Classes="crop" Text="{Binding CropTopText, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.CropTop}" />
+                          <TextBox Name="CropLeftBox" Grid.Column="0" Grid.Row="1" Classes="crop" Text="{Binding CropLeftText, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.CropLeft}" />
+                          <PathIcon Grid.Column="1" Grid.Row="1" Width="34" Height="34" Margin="14" Opacity="0.7" Data="M 6,0 L 8,0 L 8,30 L 38,30 L 38,32 L 6,32 Z M 0,6 L 32,6 L 32,38 L 30,38 L 30,8 L 0,8 Z" />
+                          <TextBox Name="CropRightBox" Grid.Column="2" Grid.Row="1" Classes="crop" Text="{Binding CropRightText, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.CropRight}" />
+                          <TextBox Name="CropBottomBox" Grid.Column="1" Grid.Row="2" Classes="crop" Text="{Binding CropBottomText, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.CropBottom}" />
+                        </Grid>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="group">
+                      <StackPanel Spacing="4">
+                        <TextBlock Classes="group-title" Text="{Binding Text.Cursor}" />
+                        <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.CursorClip}" />
+                          <Border Classes="row-control"><ToggleButton Name="CursorClipSwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding CursorClipEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.CursorClip}" /></Border>
+                        </ui:SettingRow>
+                        <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.CursorSpeed}" ToolTip.Tip="{Binding Text.CursorScaledOnly}" />
+                          <Border Classes="row-control"><ToggleButton Name="CursorSpeedSwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding CursorSpeedEnabled, Mode=TwoWay}" HorizontalAlignment="Right" ToolTip.Tip="{Binding Text.CursorScaledOnly}" AutomationProperties.Name="{Binding Text.CursorSpeed}" /></Border>
+                        </ui:SettingRow>
+                        <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.CursorHide}" />
+                          <Border Classes="row-control"><ToggleButton Name="CursorHideSwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding CursorHideEnabled, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.CursorHide}" /></Border>
+                        </ui:SettingRow>
+                        <ui:SettingRow>
+                          <TextBlock Classes="row-label" Text="{Binding Text.CursorScale}" ToolTip.Tip="{Binding Text.CursorScaledOnly}" />
+                          <Border Classes="row-control"><ToggleButton Name="CursorScaleSwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding CursorScaleEnabled, Mode=TwoWay}" HorizontalAlignment="Right" ToolTip.Tip="{Binding Text.CursorScaledOnly}" AutomationProperties.Name="{Binding Text.CursorScale}" /></Border>
+                        </ui:SettingRow>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="group">
                       <StackPanel Spacing="4">
                         <TextBlock Classes="group-title" Text="{Binding Text.Shortcut}" />
                         <ui:SettingRow>
@@ -272,6 +344,95 @@
               </StackPanel>
             </Border>
           </Grid>
+          <Border Name="VideoCard" Classes="card" IsVisible="{Binding IsVideo}" VerticalAlignment="Top">
+            <StackPanel Spacing="12">
+              <TextBlock Classes="heading" Text="Super Video" Margin="0" />
+              <TextBlock Text="{Binding Text.VideoIntro}" TextWrapping="Wrap" FontSize="14" />
+              <Grid ColumnDefinitions="Auto,*,Auto">
+                <Button Name="VideoAddButton" Classes="primary" Content="{Binding Text.VideoAdd}" IsEnabled="{Binding !Video.IsRunning}" MinWidth="150" HorizontalContentAlignment="Center" AutomationProperties.Name="{Binding Text.VideoAdd}" />
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+                  <Button Name="VideoStartButton" Classes="primary" Content="{Binding Text.VideoStart}" Command="{Binding Video.StartCommand}" IsEnabled="{Binding Video.CanStart}" IsVisible="{Binding !Video.IsRunning}" MinWidth="110" HorizontalContentAlignment="Center" AutomationProperties.Name="{Binding Text.VideoStart}" />
+                  <Button Name="VideoStopButton" Content="{Binding Text.VideoStop}" Command="{Binding Video.StopCommand}" IsVisible="{Binding Video.IsRunning}" MinWidth="110" HorizontalContentAlignment="Center" AutomationProperties.Name="{Binding Text.VideoStop}" />
+                </StackPanel>
+              </Grid>
+              <Border Background="{DynamicResource SelectionBrush}" CornerRadius="10" Padding="14,10">
+                <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                  <TextBlock Classes="row-label" Text="{Binding Text.VideoOutput}" VerticalAlignment="Center" Margin="0,0,12,0" />
+                  <TextBlock Name="VideoFolderText" Grid.Column="1" Text="{Binding Video.FolderLabel}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" FontSize="13" ToolTip.Tip="{Binding Video.FolderLabel}" />
+                  <Button Name="VideoFolderButton" Grid.Column="2" Content="{Binding Text.VideoChooseFolder}" IsEnabled="{Binding !Video.IsRunning}" Margin="12,0,0,0" AutomationProperties.Name="{Binding Text.VideoChooseFolder}" />
+                  <Button Grid.Column="3" Classes="icon" Command="{Binding Video.ClearFolderCommand}" IsVisible="{Binding Video.Folder, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" IsEnabled="{Binding !Video.IsRunning}" Margin="8,0,0,0" Width="36" ToolTip.Tip="{Binding Text.VideoNextToEach}" AutomationProperties.Name="{Binding Text.VideoNextToEach}"><PathIcon Width="12" Height="12" Data="M 4,2 L 12,10 L 20,2 L 22,4 L 14,12 L 22,20 L 20,22 L 12,14 L 4,22 L 2,20 L 10,12 L 2,4 Z" /></Button>
+                </Grid>
+              </Border>
+              <TextBlock Name="VideoNoteText" Text="{Binding Video.Note}" IsVisible="{Binding Video.HasNote}" TextWrapping="Wrap" FontSize="13" Foreground="{DynamicResource AccentBrush}" />
+              <TextBlock Classes="muted" Text="{Binding Text.VideoEmpty}" IsVisible="{Binding Video.IsEmpty}" TextWrapping="Wrap" Margin="0,8" />
+              <ItemsControl Name="VideoList" ItemsSource="{Binding Video.Items}" IsVisible="{Binding Video.HasItems}">
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="10" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:VideoItem">
+                    <Border BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="14,12">
+                      <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="*,Auto,Auto">
+                          <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                            <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" FlowDirection="LeftToRight" HorizontalAlignment="Left" ToolTip.Tip="{Binding Path}" />
+                            <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
+                          </StackPanel>
+                          <Button Grid.Column="1" Content="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.VideoShow}" Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.RevealCommand}" CommandParameter="{Binding}" IsVisible="{Binding IsDone}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                          <Button Grid.Column="2" Content="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.VideoRemove}" Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.RemoveCommand}" CommandParameter="{Binding}" IsEnabled="{Binding IsEditable}" VerticalAlignment="Center" />
+                        </Grid>
+                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="6" IsVisible="{Binding IsWorking}" />
+                        <WrapPanel Orientation="Horizontal" IsEnabled="{Binding IsEditable}">
+                          <StackPanel Spacing="4" Margin="0,0,12,6">
+                            <TextBlock Classes="muted" Text="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.VideoFrames}" />
+                            <ComboBox Width="110" HorizontalAlignment="Left" ItemsSource="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.Frames}" SelectedIndex="{Binding FramesIndex, Mode=TwoWay}" FlowDirection="LeftToRight">
+                              <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:VideoChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                            </ComboBox>
+                          </StackPanel>
+                          <StackPanel Spacing="4" Margin="0,0,12,6">
+                            <TextBlock Classes="muted" Text="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.Generator}" />
+                            <ComboBox Width="150" HorizontalAlignment="Left" ItemsSource="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.Techniques}" SelectedIndex="{Binding TechniqueIndex, Mode=TwoWay}" FlowDirection="LeftToRight">
+                              <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:VideoChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                            </ComboBox>
+                          </StackPanel>
+                          <StackPanel Spacing="4" Margin="0,0,12,6">
+                            <TextBlock Classes="muted" Text="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.VideoSize}" />
+                            <ComboBox Width="170" HorizontalAlignment="Left" ItemsSource="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.Sizes}" SelectedIndex="{Binding SizeIndex, Mode=TwoWay}">
+                              <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:VideoChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                            </ComboBox>
+                          </StackPanel>
+                          <StackPanel Spacing="4" Margin="0,0,12,6">
+                            <TextBlock Classes="muted" Text="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.Upscaler}" />
+                            <ComboBox Width="190" HorizontalAlignment="Left" ItemsSource="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.Upscalers}" SelectedIndex="{Binding UpscalerIndex, Mode=TwoWay}" FlowDirection="LeftToRight">
+                              <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:VideoChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                            </ComboBox>
+                          </StackPanel>
+                          <StackPanel Spacing="4" Margin="0,0,12,6">
+                            <TextBlock Classes="muted" Text="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.VideoCodec}" />
+                            <ComboBox Width="150" HorizontalAlignment="Left" ItemsSource="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Video.Codecs}" SelectedIndex="{Binding CodecIndex, Mode=TwoWay}" FlowDirection="LeftToRight">
+                              <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:VideoChoice"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                            </ComboBox>
+                          </StackPanel>
+                        </WrapPanel>
+                      </StackPanel>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock Classes="muted" Text="{Binding Text.VideoNote}" TextWrapping="Wrap" FontSize="12" />
+            </StackPanel>
+          </Border>
+          <Border Name="ModsCard" Classes="card" IsVisible="{Binding IsMods}" VerticalAlignment="Top" Padding="28,40">
+            <StackPanel Spacing="18" HorizontalAlignment="Center" MaxWidth="620">
+              <Path Data="{StaticResource ModsIcon}" Stroke="{DynamicResource AccentBrush}" StrokeThickness="1.6" StrokeJoin="Round" Width="44" Height="44" Stretch="Uniform" HorizontalAlignment="Center" />
+              <TextBlock Text="App Mods" Classes="heading" HorizontalAlignment="Center" Margin="0" FontSize="24" FlowDirection="LeftToRight" />
+              <Border Background="{DynamicResource SelectionBrush}" CornerRadius="14" Padding="24,20">
+                <StackPanel Spacing="12">
+                  <TextBlock Text="Coming soon" FontSize="18" FontWeight="SemiBold" TextAlignment="Center" Foreground="{DynamicResource AccentBrush}" FlowDirection="LeftToRight" />
+                  <TextBlock Text="App Mods will let the community make mods for MFG SUPER MOTION - new features, tools and looks - without changing the app itself or publishing it again." FontSize="14" TextWrapping="Wrap" TextAlignment="Center" LineHeight="22" FlowDirection="LeftToRight" />
+                  <TextBlock Classes="muted" Text="Install a mod, switch it on or off, and the app stays as it is." FontSize="13" TextWrapping="Wrap" TextAlignment="Center" FlowDirection="LeftToRight" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
           <Border Name="SupportCard" Classes="card" IsVisible="{Binding IsSupport}" VerticalAlignment="Top" Padding="28,40">
             <StackPanel Spacing="22" HorizontalAlignment="Center" MaxWidth="620">
               <TextBlock Text="{Binding Text.Support}" Classes="heading" HorizontalAlignment="Center" Margin="0" FontSize="24" />
@@ -321,10 +482,14 @@
                 <TextBlock Classes="row-label" Text="{Binding Text.MinimizeToTray}" />
                 <Border Classes="row-control"><ToggleButton Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding MinimizeToTray, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.MinimizeToTray}" /></Border>
               </ui:SettingRow>
+              <ui:SettingRow>
+                <TextBlock Classes="row-label" Text="{Binding Text.EngineLog}" />
+                <Border Classes="row-control"><ToggleButton Name="EngineLogSwitch" Theme="{StaticResource ArmoSwitch}" IsChecked="{Binding EngineLog, Mode=TwoWay}" HorizontalAlignment="Right" AutomationProperties.Name="{Binding Text.EngineLog}" /></Border>
+              </ui:SettingRow>
               <TextBlock Classes="muted" Text="{Binding Text.StartupDescription}" />
               <Border Height="1" Background="{DynamicResource LineBrush}" Margin="0,4" />
-              <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveLearning}" />
               <TextBlock Classes="group-title" Text="{Binding Text.LearningCache}" />
+              <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveLearning}" />
               <TextBlock Classes="muted" Text="{Binding Text.CacheEmpty}" IsVisible="{Binding NoLearnedGames}" />
               <ItemsControl Name="LearnedList" ItemsSource="{Binding LearnedGames}" IsVisible="{Binding HasLearnedGames}">
                 <ItemsControl.ItemTemplate>
@@ -339,25 +504,45 @@
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
+
             </StackPanel>
           </Border>
           <Border Name="HelpCard" Classes="card" IsVisible="{Binding IsHelp}" VerticalAlignment="Top">
             <StackPanel Spacing="14">
               <TextBlock Classes="heading" Text="{Binding Text.HelpTitle}" Margin="0" />
+              <Border Name="FeedbackCard" Background="{DynamicResource SelectionBrush}" CornerRadius="12" Padding="16,12">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="{Binding Text.FeedbackTitle}" TextWrapping="Wrap" FontSize="14" FontWeight="SemiBold" />
+                  <TextBox Name="FeedbackBox" Classes="field" Text="{Binding FeedbackText, Mode=TwoWay}" PlaceholderText="{Binding Text.FeedbackHint}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" MaxHeight="200" MaxLength="1800" AutomationProperties.Name="{Binding Text.FeedbackTitle}" />
+                  <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Spacing="2" VerticalAlignment="Center">
+                      <CheckBox Name="FeedbackAttachBox" Content="{Binding Text.FeedbackAttach}" IsChecked="{Binding FeedbackAttach, Mode=TwoWay}" IsEnabled="{Binding CanAttachLog}" />
+                      <TextBlock Classes="muted" Text="{Binding FeedbackLogNote}" TextWrapping="Wrap" FontSize="12" IsVisible="{Binding !CanAttachLog}" />
+                    </StackPanel>
+                    <Button Name="FeedbackSendButton" Grid.Column="1" Classes="primary" Content="{Binding Text.FeedbackSend}" Command="{Binding SendFeedbackCommand}" IsEnabled="{Binding CanSendFeedback}" MinWidth="110" HorizontalContentAlignment="Center" AutomationProperties.Name="{Binding Text.FeedbackSend}" />
+                  </Grid>
+                  <TextBlock Name="FeedbackStatusText" Text="{Binding FeedbackStatus}" TextWrapping="Wrap" FontSize="13" IsVisible="{Binding FeedbackStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                  <TextBlock Classes="muted" Text="{Binding Text.FeedbackWhat}" TextWrapping="Wrap" FontSize="12" />
+                </StackPanel>
+              </Border>
               <Border Name="HelpOfficial" Background="{DynamicResource SelectionBrush}" CornerRadius="12" Padding="16,12">
                 <StackPanel Spacing="8">
                   <TextBlock Text="{Binding Text.HelpOfficial}" TextWrapping="Wrap" FontSize="14" FontWeight="SemiBold" />
                   <TextBlock Classes="muted" Text="{Binding Text.HelpMaker}" />
                   <WrapPanel Orientation="Horizontal">
                     <Button Classes="link" Content="GitHub" Command="{Binding OpenLinkCommand}" CommandParameter="github" ToolTip.Tip="https://github.com/NODIX-TECH/MFG-SUPER-MOTION" />
-                    <Button Classes="link" Content="mfg-super-motion.com" Command="{Binding OpenLinkCommand}" CommandParameter="site" ToolTip.Tip="https://mfg-super-motion.com" />
+                    <Button Classes="link" Content="mfgsm.com" Command="{Binding OpenLinkCommand}" CommandParameter="site" ToolTip.Tip="https://www.mfgsm.com/" />
                     <Button Name="YoutubeButton" Classes="link primary" Content="YouTube · NODIX TECH" Command="{Binding OpenLinkCommand}" CommandParameter="youtube" ToolTip.Tip="https://www.youtube.com/@Nodix-Tech" />
                   </WrapPanel>
                 </StackPanel>
               </Border>
               <TextBlock Text="{Binding Text.HelpDescription}" TextWrapping="Wrap" FontSize="14" />
-
-              <Border Height="1" Background="{DynamicResource LineBrush}" />
+              <Border Name="HelpGuideCard" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="12" ClipToBounds="True">
+              <StackPanel>
+              <ToggleButton Name="HelpGuideToggle" Theme="{StaticResource AdvancedButton}" IsChecked="{Binding IsHelpGuideOpen, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.HelpGuide}">
+                <StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="{Binding Text.HelpGuide}" /><PathIcon Width="18" Height="12" Data="M 0,0 L 2,0 L 10,8 L 18,0 L 20,0 L 10,10 Z" /></StackPanel>
+              </ToggleButton>
+              <StackPanel Name="HelpGuide" IsVisible="{Binding IsHelpGuideOpen}" Spacing="14" Margin="20,4,20,18">
               <TextBlock Classes="group-title" Text="{Binding Text.HelpStartTitle}" />
               <TextBlock Text="{Binding Text.HelpStart}" TextWrapping="Wrap" FontSize="14" LineHeight="21" />
 
@@ -372,6 +557,8 @@
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.Mode}" /><TextBlock Classes="muted" Text="{Binding Text.HelpMode}" /></StackPanel>
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.GameType}" /><TextBlock Classes="muted" Text="{Binding Text.HelpGameType}" /></StackPanel>
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.AdaptiveLearning}" /><TextBlock Classes="muted" Text="{Binding Text.HelpAml}" /></StackPanel>
+              <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.AdaptiveFlow}" /><TextBlock Classes="muted" Text="{Binding Text.HelpAfs}" /></StackPanel>
+
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.Upscaling}" /><TextBlock Classes="muted" Text="{Binding Text.HelpUpscaling}" /></StackPanel>
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.GroupPacing}" /><TextBlock Classes="muted" Text="{Binding Text.HelpPacing}" /></StackPanel>
               <StackPanel Classes="help-item"><TextBlock Classes="help-name" Text="{Binding Text.Display}" /><TextBlock Classes="muted" Text="{Binding Text.HelpScreen}" /></StackPanel>
@@ -388,6 +575,7 @@
               <Border Height="1" Background="{DynamicResource LineBrush}" />
               <TextBlock Classes="group-title" Text="{Binding Text.HelpTroubleTitle}" />
               <TextBlock Text="{Binding Text.HelpTrouble}" TextWrapping="Wrap" FontSize="14" LineHeight="21" />
+              <Button Name="OpenLogsButton" Classes="link" HorizontalAlignment="Left" Content="{Binding Text.OpenLogs}" Command="{Binding OpenLogsCommand}" />
 
               <Border Height="1" Background="{DynamicResource LineBrush}" />
               <TextBlock Classes="group-title" Text="{Binding Text.HelpKeysTitle}" />
@@ -407,6 +595,9 @@
                 <Button Classes="link" Content="{Binding IntelDrivers}" Command="{Binding OpenLinkCommand}" CommandParameter="intel" ToolTip.Tip="https://www.intel.com/content/www/us/en/download-center/home.html" />
                 <Button Classes="link primary" Content="{Binding Text.SupportButton}" Command="{Binding OpenLinkCommand}" CommandParameter="patreon" ToolTip.Tip="https://www.patreon.com/cw/NODIXTECH/shop" />
               </WrapPanel>
+              </StackPanel>
+              </StackPanel>
+              </Border>
             </StackPanel>
           </Border>
         </Panel>

@@ -36,6 +36,7 @@ type LearnedItem(game: LearnedGame, status: string, delete: LearnedGame -> unit)
     member _.Status = status
     member _.DeleteCommand = deleteCommand
 
+
 /// The START / STOP MOTION shortcut as Windows counts it: modifiers * 65536 + virtual key.
 module Shortcut =
     let private modifierNames = [ 2, "Ctrl"; 1, "Alt"; 4, "Shift"; 8, "Win" ]
@@ -82,10 +83,17 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let mutable transparency = initial.Transparency
     let mutable startWithWindows = startupRegistration.IsEnabled
     let mutable startMinimized = initial.StartMinimized
+    let mutable engineLog = initial.EngineLog
     let mutable minimizeToTray = initial.MinimizeToTray
     let mutable startupError = false
     let mutable hotkeyValue = initial.Hotkey
     let mutable capturingHotkey = false
+    // A message to the developer (Help, round 47): sent only by its button.
+    let mutable feedbackText = ""
+    let mutable feedbackAttach = false
+    let mutable feedbackStatus = ""
+    let mutable feedbackBusy = false
+    let mutable feedbackSentAt = DateTime.MinValue
     let text () = UiText.forLanguage language
     let themes =
         let text = text ()
@@ -94,12 +102,17 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let windowModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     let countdowns = Preferences.countdowns |> Array.map (fun _ -> ChoiceItem(""))
     let gpuPriorities = [| ChoiceItem(""); ChoiceItem("") |]
+
     // The engine's sync modes, by their numbers: off, default, VSync on every, every second, every third refresh.
     let syncModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("VSync"); ChoiceItem("VSync ½"); ChoiceItem("VSync ⅓") |]
     let motionSources = [| ChoiceItem("DLSS MFG"); ChoiceItem("NVIDIA Optical Flow"); ChoiceItem("") |]
     let xessMotionSources = [| ChoiceItem("XeSS MFG"); ChoiceItem(""); ChoiceItem("NVIDIA Optical Flow") |]
     let msmSearches = [| ChoiceItem("SMFG"); ChoiceItem("") |]
-    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.0" |]
+    let gameFpsChoices = Preferences.gameFpsRates |> Array.map (fun r -> ChoiceItem(if r = 0 then "" else string r))
+    let dlssPresets = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
+    // Performance (preset C) picked: the page shows why it is not advised.
+    let presetCPicked = Event<unit>()
+    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.1" |]
     let gameTypes = [| ChoiceItem(""); ChoiceItem("2D"); ChoiceItem("2.5D"); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     let labelChoices () =
         let text = text ()
@@ -108,10 +121,14 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         windowModes[0].Label <- text.Borderless; windowModes[1].Label <- text.Scaled; windowModes[2].Label <- text.Windowed
         countdowns |> Array.iteri (fun i item -> item.Label <- String.Format(text.Seconds, Preferences.countdowns[i]))
         gpuPriorities[0].Label <- text.Realtime; gpuPriorities[1].Label <- text.Normal
+
         syncModes[0].Label <- text.SyncOff; syncModes[1].Label <- text.Default
         motionSources[2].Label <- text.GpuEstimate
         xessMotionSources[1].Label <- text.GpuEstimate
         msmSearches[1].Label <- sprintf "SMFG · %s" text.Fast
+        gameFpsChoices[0].Label <- text.GameAuto
+        dlssPresets[0].Label <- text.PresetDriver; dlssPresets[1].Label <- text.PresetPerformance
+        dlssPresets[2].Label <- text.PresetQuality; dlssPresets[3].Label <- text.PresetBalanced
         gameTypes[0].Label <- text.GameAuto; gameTypes[3].Label <- text.GameFirstPerson; gameTypes[4].Label <- text.GameThirdPerson
         gameTypes[5].Label <- text.GameRacing; gameTypes[6].Label <- text.GameOpenWorld; gameTypes[7].Label <- text.GameCustom
     let mutable page = "display"
@@ -128,10 +145,14 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let hotkey = new GlobalHotkey()
     let mutable engineStatus = EngineStatus.idle
     let mutable disposed = false
+    // Super Video (round 48): its own page; it does not start while Super Motion runs.
+    let video = new SuperVideoModel(text, post, (fun () -> engineStatus.Phase <> Idle))
     // "Preferred GPU" and "Generator" go by each other: the cards offered are the ones the picked generator can
     // run on (DLSS MFG: NVIDIA RTX cards only; XeSS MFG: the ones Intel's library takes; MSM FG: every card), by
     // name - and the generators offered are the ones that run on the picked card (any, while the card is "Auto").
     let mutable cards: CardInfo array = [||]
+    /// What the PC said of VRR at this start (engine "--vrr"); Reset takes it too.
+    let mutable systemVrr: bool option = None
     let runsOn generator (card: CardInfo) = match generator with | 0 -> card.Dlss | 1 -> card.Xess | _ -> true
     let cardNames generator = cards |> Array.filter (runsOn generator) |> Array.map _.Name
     let generatorIds (options: DisplayOptions) =
@@ -139,6 +160,9 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         // (A card saved with the profile that the generator saved with it cannot run on counts as "Auto".)
         match cards |> Array.tryFind (fun c -> c.Name = options.Gpu && runsOn options.Generator c) with
         | Some card -> all |> Array.filter (fun g -> runsOn g card)
+        // "Auto": the generators some card of this PC can run (round 43: an old GTX was offered DLSS MFG); all of
+        // them while the engine has not told the cards yet.
+        | None when cards.Length > 0 -> all |> Array.filter (fun g -> cards |> Array.exists (runsOn g))
         | None -> all
 
     // While a list is handed over anew (the cards the engine found, the generators that run on the card picked)
@@ -176,13 +200,14 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         notifyLists ()
         notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "OverSharpness"; "OverSharpnessLabel"
                  "CaptureApiIndex"; "WindowModeIndex"; "CountdownIndex"; "QueueTargetIndex"
-                 "FrameLimit"; "FrameLimitLabel"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
-                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "AdaptiveLearningEnabled"; "LearningStatus"
-                 "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "MotionGuardEnabled"; "FpsCounterEnabled"; "StatusNote"; "HasStatusNote" ]
+                 "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
+                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "LearningStatus"
+                 "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "FpsCounterEnabled"; "StatusNote"; "HasStatusNote" ]
     let notifyEngine () = notify [ "IsMotionActive"; "IsMotionWaiting"; "IsMotionRunning"; "MotionButtonText"; "StatusText"; "HasStatus"; "StatusNote"; "HasStatusNote"; "LearningStatus" ]
     // What Adaptive Motion Learning keeps, game by game (Settings): read when the page is opened, and again when
     // one is deleted or the engine says a game got further.
     let learned = ObservableCollection<LearnedItem>()
+
     let rec refreshLearned () =
         let text = text ()
         learned.Clear()
@@ -194,10 +219,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         engine.Forget game.Game
         LearnedGames.delete game
         refreshLearned ()
+
     let persist () =
         store.Schedule { Version = 1; Language = language; Theme = theme
                          Transparency = transparency; AdvancedOpen = advanced
-                         StartWithWindows = startWithWindows; StartMinimized = startMinimized; MinimizeToTray = minimizeToTray
+                         StartWithWindows = startWithWindows; StartMinimized = startMinimized; MinimizeToTray = minimizeToTray; EngineLog = engineLog
                          Hotkey = hotkeyValue
                          SelectedProfile = selected.Id; Profiles = profiles |> Seq.map _.Snapshot |> Seq.toArray }
     // A slider dragged across its range is one change for the engine, not fifty.
@@ -216,12 +242,22 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         let text = text ()
         [ "aml_say0", text.StudyLine; "aml_say1", text.StudyTurn; "aml_say2", text.StudyLook; "aml_say3", text.StudyWalk; "aml_say4", text.StudyDone
           "aml_say5", text.StudyDrive; "aml_say6", text.StudyStraight; "aml_say7", text.StudyTurns; "aml_say8", text.StudyScroll
-          "aml_say9", text.StudyNotice; "aml_say10", text.StudyBack; "aml_say11", text.StudyHud ]
-    let toggleMotion () =
+          "aml_say9", text.StudyNotice; "aml_say10", text.StudyBack; "aml_say11", text.StudyHud
+          "aml_say12", text.StudyRun; "aml_say13", text.StudyAim; "aml_say14", text.StudyFree ]
+    // now: started by the shortcut with the game in front - that window is taken at once, no countdown (round 42).
+    let startOrStop now =
         if engine.IsActive then engine.Stop()
         else
             engine.SetTexts(studyTexts ())
-            engine.Start selected.Options |> ignore
+            engine.Start(selected.Options, now) |> ignore
+    let toggleMotion () = startOrStop false
+    // A Crop input box: empty is 0, a number is taken (up to the most), anything else leaves it as it was.
+    let cropSet (value: string) (put: DisplayOptions -> int -> DisplayOptions) =
+        let text = if isNull value then "" else value.Trim()
+        let number = if text = "" then Some 0 else match Int32.TryParse text with | true, n when n >= 0 -> Some (min n Preferences.cropMax) | _ -> None
+        match number with
+        | Some n -> updateOptions (fun o -> put o n)
+        | None -> ()
     let effectiveHotkey () =
         if hotkeyValue = 0 then Preferences.defaultHotkey elif hotkeyValue < 0 then 0 else hotkeyValue
     let validName () =
@@ -229,12 +265,51 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         name.Length > 0 && name.Length <= 40 &&
         not (UiText.defaultNames.Value |> Array.exists (fun reserved -> String.Equals(reserved, name, StringComparison.OrdinalIgnoreCase))) &&
         (profiles |> Seq.forall (fun p -> (not adding && p.Id = selected.Id) || not (String.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))))
+    // Round 49: the sidebar shows Super Motion and Support; "More" opens the rest (Super Video, App Mods) - and stays
+    // open while one of them is the page. The Help page's guide is behind a button of its own.
+    let mutable moreOpen = false
+    let mutable helpGuideOpen = false
     let navigate target =
         if page <> target then
             page <- target
             if target = "settings" then refreshLearned ()
-            notify [ "IsDisplay"; "IsSupport"; "IsSettings"; "IsHelp" ]
+            if target = "video" || target = "mods" then moreOpen <- true
+            notify [ "IsDisplay"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote" ]
     let displayCommand = RelayCommand(fun () -> navigate "display")
+    let videoCommand = RelayCommand(fun () -> navigate "video")
+    let modsCommand = RelayCommand(fun () -> navigate "mods")
+    let moreCommand = RelayCommand(fun () ->
+        moreOpen <- not moreOpen
+        notify [ "IsMoreOpen" ])
+    // The engine's logs that are there to send (engine.log with "Keep a log"; frames.log in a development build).
+    let feedbackLogs () =
+        let folder = System.IO.Path.GetDirectoryName engine.LogPath
+        [ engine.LogPath; System.IO.Path.Combine(folder, "frames.log") ] |> List.filter System.IO.File.Exists
+    let sendFeedback () =
+        let text = text ()
+        let words = if isNull feedbackText then "" else feedbackText.Trim()
+        if feedbackBusy || (words = "" && not feedbackAttach) then ()
+        elif DateTime.Now - feedbackSentAt < TimeSpan.FromSeconds 30.0 then
+            feedbackStatus <- text.FeedbackWait
+            notify [ "FeedbackStatus" ]
+        else
+            feedbackBusy <- true
+            feedbackStatus <- text.FeedbackSending
+            notify [ "FeedbackStatus"; "CanSendFeedback" ]
+            let logs = if feedbackAttach then feedbackLogs () else []
+            async {
+                let! answer = Feedback.send words logs
+                post (fun () ->
+                    feedbackBusy <- false
+                    match answer with
+                    | Ok () ->
+                        feedbackSentAt <- DateTime.Now
+                        feedbackText <- ""
+                        feedbackStatus <- text.FeedbackSent
+                    | Error why -> feedbackStatus <- String.Format(text.FeedbackFailed, why)
+                    notify [ "FeedbackText"; "FeedbackStatus"; "CanSendFeedback" ])
+            } |> Async.Start
+    let sendFeedbackCommand = RelayCommand(fun () -> sendFeedback ())
     let supportCommand = RelayCommand(fun () -> navigate "support")
     // ---- The engine's download, and what is new (Updates.fs) --------------------
     // The published app has no engine in it: it is downloaded the first time the app is opened, and the app
@@ -297,6 +372,13 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                     | Error _ -> setGate "failed")
             } |> ignore
         | _ -> checkEngine ()
+    // Help: the engine's log folder opened in Explorer, for a user to send what went wrong.
+    let openLogsCommand = RelayCommand(fun () ->
+        try
+            let folder = AppData.path [| "Engine" |]
+            System.IO.Directory.CreateDirectory folder |> ignore
+            Process.Start(ProcessStartInfo("explorer.exe", "\"" + folder + "\"", UseShellExecute = true)) |> ignore
+        with _ -> ())
     let gateDownloadCommand = RelayCommand(fun () -> downloadEngine ())
     let gateSkipCommand = RelayCommand(fun () -> if (EngineStore.path ()).IsSome then setGate "")
     do onUi (fun () -> checkEngine (); checkApp ())
@@ -304,7 +386,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let links =
         dict [ "patreon", "https://www.patreon.com/cw/NODIXTECH/shop"
                "github", "https://github.com/NODIX-TECH/MFG-SUPER-MOTION"
-               "site", "https://mfg-super-motion.com"
+               "site", "https://www.mfgsm.com/"
                "youtube", "https://www.youtube.com/@Nodix-Tech"
                "app-releases", Releases.appPage
                "obs", "https://obsproject.com/download"
@@ -350,7 +432,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             persist ()
             addCommand.NotifyCanExecuteChanged()
         this.CancelDialog())
-    let resetCommand = RelayCommand(fun () -> updateOptions (fun _ -> Preferences.defaultOptions))
+    let resetCommand = RelayCommand(fun () -> updateOptions (fun _ -> match systemVrr with Some on -> { Preferences.defaultOptions with Vrr = on } | None -> Preferences.defaultOptions))
     let retrySaveCommand = RelayCommand(fun () -> store.Flush())
     let motionCommand = RelayCommand(toggleMotion)
     let shortcutCommand = RelayCommand(fun () -> this.BeginShortcutCapture())
@@ -366,15 +448,47 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                     engineStatus <- status
                     notifyEngine ()
                     if further && page = "settings" then refreshLearned ()))
-        hotkey.Pressed.Add(fun () -> post (fun () -> if not disposed && not capturingHotkey then toggleMotion ()))
+        // (This app's own window in front: there is no game to take at once - the countdown, as the button has it.)
+        hotkey.Pressed.Add(fun oursInFront -> post (fun () -> if not disposed && not capturingHotkey then startOrStop (not oursInFront)))
         hotkey.Set(effectiveHotkey ())
+        engine.SetLog engineLog
         // The engine lists the cards; asked off the window's thread, the page is told when the answer is in.
         ThreadPool.QueueUserWorkItem(fun _ ->
             let listed = engine.Cards()
             post (fun () ->
                 if not disposed then
                     cards <- listed
-                    notifyLists ())) |> ignore
+                    // A profile on a generator no card of this PC runs (DLSS MFG, the first, with no RTX card): SMFG,
+                    // which runs on any card.
+                    if listed.Length > 0 then
+                        let mutable changed = false
+                        for p in profiles do
+                            if not (listed |> Array.exists (runsOn p.Options.Generator)) then
+                                p.Options <- { p.Options with Generator = 2 }
+                                changed <- true
+                        if changed then
+                            notifyOptions ()
+                            persist ()
+                    notifyLists ())
+            // VRR follows the PC at each start: on when it is on for a window here (G-SYNC for windowed mode, or
+            // Windows' dynamic refresh rate), off when it is not; left as it was when the engine cannot tell.
+
+            engine.QuietRtss()
+            let vrr = engine.SystemVrr()
+            post (fun () ->
+                match vrr with
+                | Some on when not disposed ->
+                    systemVrr <- Some on
+                    let mutable changed = false
+                    for p in profiles do
+                        if p.Options.Vrr <> on then
+                            p.Options <- { p.Options with Vrr = on }
+                            changed <- true
+                    if changed then
+                        notifyOptions ()
+                        persist ()
+                        sendOptions ()
+                | _ -> ())) |> ignore
 
     new(store) = new MainViewModel(store, StartupRegistration.forCurrentProcess())
     new() = new MainViewModel(new StateStore(StateStore.DefaultPath))
@@ -399,7 +513,9 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         and set value =
             if not (isNull (box value)) && not (obj.ReferenceEquals(value, selected)) then
                 if engine.IsActive && value.Options.Generator <> selected.Options.Generator then engine.Stop()
+
                 selected <- value
+
                 notify [ "SelectedProfile" ]
                 notifyOptions ()
                 renameCommand.NotifyCanExecuteChanged()
@@ -414,6 +530,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                 let labels = [| this.Text.Light; this.Text.Dark; this.Text.System |]
                 themes |> Array.iteri (fun i item -> item.Label <- labels[i])
                 labelChoices ()
+                video.Relabel()
                 profiles |> Seq.filter (fun p -> p.Id = "default") |> Seq.iter (fun p -> p.Name <- this.Text.Default)
                 notify [ "LanguageIndex"; "Text"; "DialogTitle"; "IsArabic"; "IsRightToLeft"; "UiFontFamily"; "NvidiaDrivers"; "AmdDrivers"; "IntelDrivers"; "GateText"; "GateActionText"; "AppUpdateText"
                          "FrameLimitLabel"; "ShortcutLabel" ]
@@ -443,6 +560,13 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.MinimizeToTray
         with get () = minimizeToTray
         and set value = if this.SetProperty(&minimizeToTray, value) then persist ()
+    // The engine's log (off): for when something is to be looked into.
+    member _.EngineLog
+        with get () = engineLog
+        and set value =
+            if this.SetProperty(&engineLog, value) then
+                engine.SetLog value
+                persist ()
     member _.HasStartupError = startupError
     member _.ThemeIndex
         with get () = theme
@@ -526,6 +650,37 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                 updateOptions (fun o -> { o with FrameLimit = Preferences.normalizeFrameLimit stepped })
     member _.FrameLimitLabel =
         if selected.Options.FrameLimit <= 0 then this.Text.Off else string selected.Options.FrameLimit
+    // Game FPS (round 43): picked from the rates games run at; "Auto" the engine reads the game's pace from its frames.
+    // (A rate saved that is not in the list shows as the nearest one.)
+    member _.GameFpsChoices = gameFpsChoices
+    member _.GameFpsIndex
+        with get () =
+            let value = selected.Options.GameFps
+            if value <= 0 then 0
+            else Preferences.gameFpsRates |> Array.mapi (fun i r -> i, abs (r - value)) |> Array.filter (fun (i, _) -> i > 0) |> Array.minBy snd |> fst
+        and set value =
+            if value >= 0 && value < Preferences.gameFpsRates.Length then updateOptions (fun o -> { o with GameFps = Preferences.gameFpsRates[value] })
+    // Round 43, as Lossless Scaling has them: multi-display mode, Crop input (pixels left out on each side; a box
+    // that holds anything but a number is left as it was) and the pointer.
+    member _.MultiDisplayEnabled
+        with get () = selected.Options.MultiDisplay
+        and set value = updateOptions (fun o -> { o with MultiDisplay = value })
+    member _.CropLeftText with get () = string selected.Options.CropLeft and set (value: string) = cropSet value (fun o n -> { o with CropLeft = n })
+    member _.CropTopText with get () = string selected.Options.CropTop and set (value: string) = cropSet value (fun o n -> { o with CropTop = n })
+    member _.CropRightText with get () = string selected.Options.CropRight and set (value: string) = cropSet value (fun o n -> { o with CropRight = n })
+    member _.CropBottomText with get () = string selected.Options.CropBottom and set (value: string) = cropSet value (fun o n -> { o with CropBottom = n })
+    member _.CursorClipEnabled
+        with get () = selected.Options.CursorClip
+        and set value = updateOptions (fun o -> { o with CursorClip = value })
+    member _.CursorSpeedEnabled
+        with get () = selected.Options.CursorSpeed
+        and set value = updateOptions (fun o -> { o with CursorSpeed = value })
+    member _.CursorHideEnabled
+        with get () = selected.Options.CursorHide
+        and set value = updateOptions (fun o -> { o with CursorHide = value })
+    member _.CursorScaleEnabled
+        with get () = selected.Options.CursorScale
+        and set value = updateOptions (fun o -> { o with CursorScale = value })
     member _.LimitToScreenEnabled
         with get () = selected.Options.LimitToScreen
         and set value = updateOptions (fun o -> { o with LimitToScreen = value })
@@ -568,10 +723,25 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.MsmSearchIndex
         with get () = selected.Options.MsmSearch
         and set value = if value >= 0 then updateOptions (fun o -> { o with MsmSearch = value })
+    // DLSS MFG's preset (NVIDIA's own C, B, A): written into the driver's profile of the engine when it starts.
+    member _.DlssPresets = dlssPresets
+    member _.DlssPresetIndex
+        with get () = selected.Options.DlssPreset
+        and set value =
+            if value >= 0 then
+                let warn = value = 1 && selected.Options.DlssPreset <> 1
+                updateOptions (fun o -> { o with DlssPreset = value })
+                if warn then presetCPicked.Trigger()
+    member _.PresetCPicked = presetCPicked.Publish
     // Adaptive Motion Learning: the switch, what the engine says of how far along it is, and what is kept.
     member _.AdaptiveLearningEnabled
         with get () = selected.Options.AdaptiveLearning
         and set value = updateOptions (fun o -> { o with AdaptiveLearning = value })
+    // Adaptive Flow Scale: part of it - open only while it is on.
+    member _.AdaptiveFlowEnabled
+        with get () = selected.Options.AdaptiveFlow
+        and set value = updateOptions (fun o -> { o with AdaptiveFlow = value })
+    member _.IsAdaptiveFlowOpen = selected.Options.AdaptiveLearning
     member _.LearningStatus =
         if not selected.Options.AdaptiveLearning || engineStatus.Phase <> Running || engineStatus.Learning < 0 then ""
         elif engineStatus.Learning > 100 then this.Text.LearnedDone
@@ -582,9 +752,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.StillPixelsEnabled
         with get () = selected.Options.StillPixels
         and set value = updateOptions (fun o -> { o with StillPixels = value })
-    member _.MotionGuardEnabled
-        with get () = selected.Options.MotionGuard
-        and set value = updateOptions (fun o -> { o with MotionGuard = value })
+
     member _.FpsCounterEnabled
         with get () = selected.Options.FpsCounter
         and set value = updateOptions (fun o -> { o with FpsCounter = value })
@@ -650,9 +818,34 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             notify [ "ShortcutLabel"; "IsCapturingShortcut"; "StatusNote"; "HasStatusNote" ]
 
     member _.IsDisplay = page = "display"
+    member _.IsVideo = page = "video"
+    member _.IsMods = page = "mods"
+    member _.IsMoreOpen = moreOpen
+    member _.IsHelpGuideOpen
+        with get () = helpGuideOpen
+        and set value =
+            helpGuideOpen <- value
+            notify [ "IsHelpGuideOpen" ]
     member _.IsSupport = page = "support"
+    member _.Video = video
     member _.IsSettings = page = "settings"
     member _.IsHelp = page = "help"
+    member _.FeedbackText
+        with get () = feedbackText
+        and set (value: string) =
+            feedbackText <- (if isNull value then "" else value)
+            notify [ "CanSendFeedback" ]
+    member _.FeedbackAttach
+        with get () = feedbackAttach
+        and set value =
+            feedbackAttach <- value
+            notify [ "CanSendFeedback" ]
+    member _.CanAttachLog = not (List.isEmpty (feedbackLogs ()))
+    member this.FeedbackLogNote = if this.CanAttachLog then "" else this.Text.FeedbackNoLog
+    member _.CanSendFeedback = not feedbackBusy && (feedbackText.Trim() <> "" || feedbackAttach)
+    member _.FeedbackStatus = feedbackStatus
+    member _.FeedbackAbout = Feedback.about ()
+    member _.SendFeedbackCommand = sendFeedbackCommand
     member _.IsAdvancedOpen
         with get () = advanced
         and set value =
@@ -685,6 +878,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.CanGateSkip = (gate = "update" || gate = "failed") && (EngineStore.path ()).IsSome
     member _.GateActionText = match gate with | "update" -> this.Text.UpdateNow | "failed" -> this.Text.Retry | _ -> this.Text.Download
     member _.GateDownloadCommand = gateDownloadCommand
+    member _.OpenLogsCommand = openLogsCommand
     member _.GateSkipCommand = gateSkipCommand
     member _.HasAppUpdate = appUpdate <> ""
     member _.AppUpdateText = String.Format(this.Text.AppUpdate, appUpdate)
@@ -700,6 +894,9 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.CancelDialog() = this.IsEditorOpen <- false; this.IsDeleteOpen <- false
     member _.DisplayCommand = displayCommand
     member _.SupportCommand = supportCommand
+    member _.VideoCommand = videoCommand
+    member _.ModsCommand = modsCommand
+    member _.MoreCommand = moreCommand
     member _.OpenLinkCommand = openLinkCommand
     member _.NvidiaDrivers = String.Format(this.Text.LinkDrivers, "NVIDIA")
     member _.AmdDrivers = String.Format(this.Text.LinkDrivers, "AMD")
@@ -724,4 +921,6 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             sendTimer.Dispose()
             (hotkey :> IDisposable).Dispose()
             (engine :> IDisposable).Dispose()
+            (video :> IDisposable).Dispose()
+
             (store :> IDisposable).Dispose()

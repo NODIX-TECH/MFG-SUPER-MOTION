@@ -89,15 +89,42 @@ module LearnedGames =
             if File.Exists hud then File.Delete hud
         with _ -> ()
 
+
 /// Starts, steers and stops the native engine (Engine\nvngx.dll, an executable:
 /// NGX checks its caller's file name). Everything it needs goes in as text - a
 /// start file, then one "key=value" line for each control that moves.
+/// The pointer as it was (round 43): the engine's Hide / Scale cursor swap Windows' pointers and Adjust cursor speed
+/// sets its speed, and put both back when they end - or, ended from outside, leave a note (cursor.state) that this
+/// puts back.
+module CursorRestore =
+    [<System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")>]
+    extern bool SystemParametersInfo(uint32 action, uint32 param, nativeint value, uint32 winIni)
+
+    let fromNote (folder: string) =
+        let note = Path.Combine(folder, "cursor.state")
+        try
+            if File.Exists note then
+                let values =
+                    File.ReadAllLines note
+                    |> Array.choose (fun line -> match line.Split('=') with | [| k; v |] -> Some (k.Trim(), v.Trim()) | _ -> None)
+                    |> dict
+                if values.ContainsKey "cursors" && values["cursors"] = "1" then SystemParametersInfo(0x0057u, 0u, 0n, 0u) |> ignore
+                match values.TryGetValue "speed" with
+                | true, v ->
+                    match Int32.TryParse v with
+                    | true, speed when speed >= 1 && speed <= 20 -> SystemParametersInfo(0x0071u, 0u, nativeint speed, 0u) |> ignore
+                    | _ -> ()
+                | _ -> ()
+                File.Delete note
+        with _ -> ()
+
 type MotionEngine() =
     let gate = obj ()
     let changed = Event<EngineStatus>()
     let mutable proc: Process = null
     let mutable status = EngineStatus.idle
     let mutable sent: (string * string) list = []
+    let mutable keepLog = false          // the engine keeps its log (Settings: off)
     let mutable stopping = false
     let mutable cards: CardInfo array = [||]
     // Lines for the engine that are not a profile's: what it writes on the frame, in the app's language.
@@ -109,6 +136,8 @@ type MotionEngine() =
         | Some path -> path
         | None -> Path.Combine(AppContext.BaseDirectory, "Engine", "nvngx.dll")
     let dataFolder = AppData.path [| "Engine" |]
+    // (An engine ended from outside last time may have left the pointer changed.)
+    do CursorRestore.fromNote dataFolder
 
     let publish next =
         let fire = lock gate (fun () ->
@@ -135,10 +164,22 @@ type MotionEngine() =
           "game", string options.GameType
           "queue", string options.QueueTarget
           "still", flag options.StillPixels
-          "guard", flag options.MotionGuard
+          "guard", "0"
           "msm_search", string options.MsmSearch
           "aml", flag options.AdaptiveLearning
+          "aml_flow", flag options.AdaptiveFlow
+          "dlssg_preset", string ([| 0; 3; 2; 1 |][Math.Clamp(options.DlssPreset, 0, 3)])
           "frame_limit", string options.FrameLimit
+          "game_fps", string options.GameFps
+          "multi_display", flag options.MultiDisplay
+          "crop_l", string options.CropLeft
+          "crop_t", string options.CropTop
+          "crop_r", string options.CropRight
+          "crop_b", string options.CropBottom
+          "cursor_clip", flag options.CursorClip
+          "cursor_speed", flag options.CursorSpeed
+          "cursor_hide", flag options.CursorHide
+          "cursor_scale", flag options.CursorScale
           "screen_limit", flag options.LimitToScreen
           "vrr", flag options.Vrr
           "sync", string options.SyncMode
@@ -204,6 +245,7 @@ type MotionEngine() =
                 true
             else false)
         if mine then
+            CursorRestore.fromNote dataFolder
             let code = try ended.ExitCode with _ -> 0
             ended.Dispose()
             let last = lock gate (fun () -> status)
@@ -220,6 +262,8 @@ type MotionEngine() =
     member _.LogPath = Path.Combine(dataFolder, "engine.log")
     /// What the engine writes on the frame (its start file's "aml_say0" .. lines): taken at the next start.
     member _.SetTexts(lines: (string * string) list) = lock gate (fun () -> texts <- lines)
+    /// Whether the engine keeps its log (Settings, off): taken at the next start.
+    member _.SetLog(on: bool) = lock gate (fun () -> keepLog <- on)
 
     /// The graphics cards of this machine as the engine sees them (asked once; empty when it cannot be asked).
     member _.Cards() =
@@ -263,8 +307,45 @@ type MotionEngine() =
             with _ -> ()
         cards
 
+    /// Is VRR on for a window on this PC (Engine/lf_vrr.inl, "--vrr"): Some true / Some false, None when it
+    /// cannot be told (or the engine does not know the question).
+    member _.SystemVrr() =
+        if not (File.Exists (enginePath ())) then None
+        else
+            try
+                let info =
+                    ProcessStartInfo(
+                        FileName = (enginePath ()),
+                        Arguments = "--vrr",
+                        WorkingDirectory = Path.GetDirectoryName (enginePath ()),
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        StandardOutputEncoding = Encoding.UTF8)
+                use asking = Process.Start info
+                // An engine that does not know "--vrr" would start for real: it is given six seconds and ended.
+                let reading = asking.StandardOutput.ReadToEndAsync()
+                let lines =
+                    if reading.Wait 6000 then reading.Result.Split('\n')
+                    else
+                        (try asking.Kill() with _ -> ())
+                        [||]
+                asking.WaitForExit 1000 |> ignore
+                // "@vrr-system <1|0|-1> <why>"
+                lines |> Array.tryPick (fun line ->
+                    let parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    if parts.Length >= 2 && parts[0] = "@vrr-system" then
+                        match parts[1] with
+                        | "1" -> Some (Some true)
+                        | "0" -> Some (Some false)
+                        | _ -> Some None
+                    else None)
+                |> Option.flatten
+            with _ -> None
+
     /// Start the engine for a profile. False when it cannot be started at all.
-    member this.Start(options: DisplayOptions) =
+    /// now: the window in front is taken at once, no countdown (started by the shortcut in a game).
+    member this.Start(options: DisplayOptions, now: bool) =
         if this.IsActive then true
         elif not (File.Exists (enginePath ())) then
             publish { EngineStatus.idle with Error = "missing" }
@@ -272,13 +353,19 @@ type MotionEngine() =
         else
             try
                 Directory.CreateDirectory dataFolder |> ignore
-                let lines = optionLines options
+                let lines = optionLines options |> List.map (fun (key, value) -> if now && key = "delay" then key, "0" else key, value)
                 let startFile = Path.Combine(dataFolder, "start.cfg")
                 let text = StringBuilder()
                 for key, value in lines do text.Append(key).Append('=').AppendLine(value) |> ignore
                 // (One line each, and no '#': the engine takes what follows one for a remark.)
                 for key, value in lock gate (fun () -> texts) do
                     text.Append(key).Append('=').AppendLine(value.Replace('\n', ' ').Replace('\r', ' ').Replace('#', ' ')) |> ignore
+                text.Append("log=").AppendLine(if lock gate (fun () -> keepLog) then "1" else "0") |> ignore
+#if DEBUG
+                // The development build (Debug, run from Visual Studio) only: frames.log beside the engine's log - every
+                // frame shown, its gap, the stutters marked (round 45). A released app never writes it.
+                text.AppendLine("frame_log=1") |> ignore
+#endif
                 text.Append("owner=").AppendLine(string Environment.ProcessId) |> ignore
                 File.WriteAllText(startFile, text.ToString(), UTF8Encoding(false))
                 let info =
@@ -332,6 +419,30 @@ type MotionEngine() =
                 running.StandardInput.WriteLine("aml_forget=" + game)
                 running.StandardInput.Flush()
             with :? IOException | :? InvalidOperationException | :? ObjectDisposedException -> ()
+
+
+    /// RivaTuner Statistics Server installed: the engine's program gets RTSS's overlay switched off ("--rtss-quiet"),
+    /// so it is seen once - in the game - and not again on the engine's window. Waited for (five seconds at most).
+    member _.QuietRtss() =
+        let installed =
+            try
+                use key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Unwinder\RTSS")
+                not (isNull key)
+            with _ -> false
+        if installed && File.Exists (enginePath ()) then
+            try
+                let info =
+                    ProcessStartInfo(
+                        FileName = (enginePath ()),
+                        Arguments = "--rtss-quiet",
+                        WorkingDirectory = Path.GetDirectoryName (enginePath ()),
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true)
+                use asking = Process.Start info
+                // (An engine that does not know the question would start for real: it is ended.)
+                if not (asking.WaitForExit 5000) then (try asking.Kill() with _ -> ())
+            with _ -> ()
 
     /// Ask the engine to stop; it puts the game's window back as it was.
     member _.Stop() =

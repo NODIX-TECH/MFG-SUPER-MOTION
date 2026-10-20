@@ -19,12 +19,12 @@ type Release =
       Sha256: string }     // of the zip, when GitHub says it ("" otherwise)
 
 /// What is published where. The app: https://github.com/NODIX-TECH/MFG-SUPER-MOTION/releases - only looked at,
-/// the user is sent to the page. The engine: https://github.com/olivo-software/SUPER-MOTION/releases - the
-/// newest release's zip (Engine\pack: nvngx.dll and what lies beside it) is downloaded and unpacked.
+/// the user is sent to the app's site (https://www.mfgsm.com/) to download it. The engine:
+/// https://github.com/olivo-software/SUPER-MOTION/releases - the newest release's zip (Engine\pack: nvngx.dll and what lies beside it) is downloaded and unpacked.
 module Releases =
     let appRepository = "NODIX-TECH/MFG-SUPER-MOTION"
     let engineRepository = "olivo-software/SUPER-MOTION"
-    let appPage = "https://github.com/NODIX-TECH/MFG-SUPER-MOTION/releases"
+    let appPage = "https://www.mfgsm.com/"
 
     // (MSM_RELEASES_API: another address to ask instead of GitHub's - the tests' own server.)
     let private testApi =

@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\armo.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>1.0.0</Version>
+    <Version>1.0.2</Version>
     <Company>NODIX TECH</Company>
     <RootNamespace>Mfg_Super_Motion</RootNamespace>
     <Authors>NODIX TECH</Authors>
@@ -26,9 +26,10 @@
 
   <!-- The native engine (Engine\build.cmd makes Engine\out): nvngx.dll is its
        executable, the rest are the runtimes it loads. -->
-  <!-- (Not when publishing - WithoutEngine in the publish profile: the published app has no engine in it. It
-       downloads the engine the first time it is opened, from the engine's own releases, and newer ones later:
-       Infrastructure\Updates.fs. In a build folder the engine beside the program is the one that is used.) -->
+  <!-- (Published too, since round 50: the app comes with its engine. A published engine says its version in
+       Engine\engine-version.txt (written after the publish, below), so newer ones from the engine's releases replace
+       it - Infrastructure\Updates.fs. In a build folder there is no such file: that engine is the one used.
+       -p:WithoutEngine=true leaves the engine out.) -->
   <ItemGroup Condition="'$(WithoutEngine)' != 'true'">
     <Content Include="..\Engine\out\**\*" Exclude="..\Engine\out\**\*.log" Link="Engine\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
@@ -71,6 +72,8 @@
       <EngineZip>$(SetupFolder)\SUPER-MOTION-Engine-$(EngineVersion).zip</EngineZip>
     </PropertyGroup>
     <Error Condition="!Exists('$(MSBuildThisFileDirectory)..\Engine\out\nvngx.dll')" Text="Engine\out has no engine: run Engine\build.cmd first." />
+    <Error Condition="'$(WithoutEngine)' != 'true' And !Exists('$(PublishedFolder)\Engine\nvngx.dll')" Text="The published folder has no engine ($(PublishedFolder)\Engine). No installer was made." />
+    <WriteLinesToFile Condition="'$(WithoutEngine)' != 'true'" File="$(PublishedFolder)\Engine\engine-version.txt" Lines="$(EngineVersion)" Overwrite="true" />
     <MakeDir Directories="$(SetupFolder)" />
     <ZipDirectory SourceDirectory="$(MSBuildThisFileDirectory)..\Engine\out" DestinationFile="$(EngineZip)" Overwrite="true" />
     <Message Importance="high" Text="Engine:    $(EngineZip)  (attach it to a release tagged $(EngineVersion) at https://github.com/olivo-software/SUPER-MOTION/releases)" />
@@ -92,8 +95,11 @@
     <Compile Include="Infrastructure\StartupRegistration.fs" />
     <Compile Include="Infrastructure\Updates.fs" />
     <Compile Include="Infrastructure\MotionEngine.fs" />
+    <Compile Include="Infrastructure\Feedback.fs" />
+    <Compile Include="Infrastructure\VideoEngine.fs" />
     <Compile Include="Infrastructure\GlobalHotkey.fs" />
     <Compile Include="ViewModels\ViewModelBase.fs" />
+    <Compile Include="ViewModels\SuperVideo.fs" />
     <Compile Include="ViewModels\MainViewModel.fs" />
     <Compile Include="Controls\SettingRow.fs" />
     <Compile Include="Controls\GroupFlow.fs" />

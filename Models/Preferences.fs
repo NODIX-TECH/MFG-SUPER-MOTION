@@ -19,6 +19,18 @@ type DisplayOptions =
       Countdown: int         // index into Preferences.countdowns
       QueueTarget: int       // 0, 1, 2
       FrameLimit: int        // frames a second shown, 0 off
+      GameFps: int           // the game's frame rate as the person gives it (20..500); 0 the engine reads it from the frames
+      // Round 43, as Lossless Scaling has them: the picture stays while another screen's window is in front; pixels left
+      // out of the captured window on each side; and the pointer (kept inside, its speed, hidden, scaled).
+      MultiDisplay: bool
+      CropLeft: int
+      CropTop: int
+      CropRight: int
+      CropBottom: int
+      CursorClip: bool
+      CursorSpeed: bool
+      CursorHide: bool
+      CursorScale: bool
       LimitToScreen: bool    // only as many frames in between as fill the screen (off: the multiplier's own count)
       Vrr: bool
       SyncMode: int          // 0 off (tearing allowed), 1 default, 2 VSync, 3 and 4 VSync on every second, every third refresh (the engine's own numbers)
@@ -30,6 +42,9 @@ type DisplayOptions =
       XessMotionSource: int  // XeSS MFG: 0 it finds the motion itself, 1 the engine's GPU estimate, 2 NVIDIA Optical Flow; kept apart from DLSS MFG's choice
       MsmSearch: int         // MSM FG: 0 its search in full, 1 the lighter one; kept apart too
       AdaptiveLearning: bool // Adaptive Motion Learning: what the hand does to the picture is learnt for each game, and the generator told
+      DlssPreset: int        // DLSS MFG's preset: 0 the driver's own, 1 Performance (C), 2 Quality (B), 3 Balanced (A); Quality unless picked
+      AdaptiveFlow: bool     // Adaptive Flow Scale (needs Adaptive Motion Learning): the size frames in between are made at follows how fast the game's picture moves
+
       Spout: bool            // every frame shown is shared as a Spout sender (OBS: Spout2 Capture)
       StillPixels: bool
       MotionGuard: bool      // no frames in between while the picture moves too fast for them (off unless asked for)
@@ -52,6 +67,7 @@ type Preferences =
       StartWithWindows: bool
       StartMinimized: bool
       MinimizeToTray: bool
+      EngineLog: bool        // the engine keeps a log (engine.log) - for when something is to be looked into; off
       // The START / STOP MOTION shortcut: modifiers * 65536 + virtual key
       // (Windows' RegisterHotKey values); 0 the default, -1 none.
       Hotkey: int
@@ -59,7 +75,7 @@ type Preferences =
       Profiles: Profile array }
 
 module Preferences =
-    let schema = 14
+    let schema = 18
     // The sync modes the engine has (see SyncMode).
     let syncModes = 5
     // The upscalers the engine has: off, sharpening only, integer, nearest neighbour, Anime4K.
@@ -75,21 +91,25 @@ module Preferences =
     let gameFlows = [| 35; 75; 50; 35; 35; 35; 35 |]
     let gameCustom = gameFlows.Length
     let frameLimitMax = 360
+    let cropMax = 4000
+    // Game FPS (round 43): "Auto" (0) and the rates games run at.
+    let gameFpsRates = [| 0; 30; 40; 45; 48; 50; 60; 72; 75; 90; 100; 120; 144; 165; 180; 200; 240; 280; 300; 360 |]
     // Shift + Alt + M (Windows counts Alt 1, Ctrl 2, Shift 4, Win 8).
     let defaultHotkey = (0x0005 <<< 16) ||| 0x4D
 
     let defaultOptions =
         { FrameGeneration = true; Generator = 0; Mode = 2; Flow = 35; Upscaler = 0; Sharpness = 50; OverSharpness = 0
           Schema = schema; CaptureApi = 0; WindowMode = 0; Countdown = 1
-          QueueTarget = 1; FrameLimit = 0; LimitToScreen = false; Vrr = false; SyncMode = 1; LowLatency = true; Hdr = false
-          GpuPriority = 0; Gpu = ""; MotionSource = 0; XessMotionSource = 0; MsmSearch = 1; AdaptiveLearning = false
+          QueueTarget = 1; FrameLimit = 0; GameFps = 0; MultiDisplay = false; CropLeft = 0; CropTop = 0; CropRight = 0; CropBottom = 0
+          CursorClip = false; CursorSpeed = false; CursorHide = false; CursorScale = false; LimitToScreen = false; Vrr = false; SyncMode = 1; LowLatency = true; Hdr = false
+          GpuPriority = 0; Gpu = ""; MotionSource = 0; XessMotionSource = 0; MsmSearch = 1; AdaptiveLearning = false; AdaptiveFlow = true; DlssPreset = 2
           Spout = false; StillPixels = true; MotionGuard = false; FpsCounter = false; GameType = 0 }
 
     let defaultProfile = { Id = "default"; Name = "Default"; Options = defaultOptions }
 
     let defaults =
         { Version = 1; Language = 0; Theme = 2; Transparency = false; AdvancedOpen = false
-          StartWithWindows = false; StartMinimized = false; MinimizeToTray = false; Hotkey = 0
+          StartWithWindows = false; StartMinimized = false; MinimizeToTray = false; EngineLog = false; Hotkey = 0
           SelectedProfile = defaultProfile.Id; Profiles = [| defaultProfile |] }
 
     /// The size frames in between are made at, percent of the picture - the same for DLSS MFG and XeSS MFG.
@@ -126,6 +146,10 @@ module Preferences =
             let options = if options.Schema < 11 then { options with SyncMode = 1 } else options
             // Before schema 14 MSM FG started on its search in full: it starts on "Fast" now.
             let options = if options.Schema < 14 then { options with MsmSearch = 1 } else options
+            // Before schema 15 there was no Adaptive Flow Scale (a file reads it as off): it starts on.
+            let options = if options.Schema < 15 then { options with AdaptiveFlow = true } else options
+            // Before schema 18 DLSS MFG's preset was the driver's own: Quality (preset B) is where it starts now, the best looking one.
+            let options = if options.Schema < 18 then { options with DlssPreset = 2 } else options
             let options =
                 if options.Schema >= schema then options
                 elif options.Schema >= 8 then options
@@ -154,13 +178,20 @@ module Preferences =
                            Countdown = Math.Clamp(options.Countdown, 0, countdowns.Length - 1)
                            QueueTarget = Math.Clamp(options.QueueTarget, 0, 2)
                            FrameLimit = normalizeFrameLimit options.FrameLimit
+                           GameFps = (if options.GameFps >= 20 && options.GameFps <= 500 then options.GameFps else 0)
+                           CropLeft = Math.Clamp(options.CropLeft, 0, cropMax)
+                           CropTop = Math.Clamp(options.CropTop, 0, cropMax)
+                           CropRight = Math.Clamp(options.CropRight, 0, cropMax)
+                           CropBottom = Math.Clamp(options.CropBottom, 0, cropMax)
                            SyncMode = (if options.SyncMode >= 0 && options.SyncMode < syncModes then options.SyncMode else 1)
                            GpuPriority = Math.Clamp(options.GpuPriority, 0, 1)
+
                            // (A file saved before schema 9 has no card: read as null.)
                            Gpu = (if isNull options.Gpu then "" else options.Gpu.Trim())
                            MotionSource = Math.Clamp(options.MotionSource, 0, 2)
                            XessMotionSource = Math.Clamp(options.XessMotionSource, 0, 2)
                            MsmSearch = Math.Clamp(options.MsmSearch, 0, 1)
+                           DlssPreset = Math.Clamp(options.DlssPreset, 0, 3)
                            GameType = Math.Clamp(options.GameType, 0, gameCustom) }
 
     let normalize state =

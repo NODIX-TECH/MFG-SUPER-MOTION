@@ -5,6 +5,7 @@ open Avalonia.Controls
 open Avalonia.Input
 open Avalonia.Markup.Xaml
 open Avalonia.Media
+open Avalonia.Platform.Storage
 open Avalonia.Styling
 open Avalonia.Threading
 open ARMO.Infrastructure
@@ -33,7 +34,10 @@ type MainWindow() as this =
             this.InvalidateVisual())
         // While the shortcut is being picked every key is its: Esc leaves it as
         // it was, Backspace or Delete takes it away, anything else with a
-        // modifier (or a function key alone) becomes the shortcut.
+        // modifier becomes the shortcut - and alone, one key that types nothing
+        // (F1..F24, Insert, Home, End, Page Up/Down, Pause, Scroll Lock, the
+        // number pad's digits): F6 by itself. (A letter, a digit or Space alone
+        // would go off while the player types or plays.)
         this.AddHandler(InputElement.KeyDownEvent, (fun _ (args: KeyEventArgs) ->
             match this.DataContext with
             | :? MainViewModel as model when model.IsCapturingShortcut ->
@@ -50,8 +54,8 @@ type MainWindow() as this =
                         ||| (if has KeyModifiers.Shift then 4 else 0) ||| (if has KeyModifiers.Meta then 8 else 0)
                     let name = key.ToString()
                     let vk = Shortcut.virtualKey name
-                    let functionKey = vk >= 0x70 && vk <= 0x87
-                    if vk <> 0 && (modifiers <> 0 || functionKey) then model.EndShortcutCapture((modifiers <<< 16) ||| vk)
+                    let alone = (vk >= 0x70 && vk <= 0x87) || (vk >= 0x60 && vk <= 0x69) || vk = 0x2D || (vk >= 0x21 && vk <= 0x24) || vk = 0x13 || vk = 0x91
+                    if vk <> 0 && (modifiers <> 0 || alone) then model.EndShortcutCapture((modifiers <<< 16) ||| vk)
             | _ -> ()), Avalonia.Interactivity.RoutingStrategies.Tunnel)
         this.Deactivated.Add(fun _ ->
             match this.DataContext with
@@ -66,6 +70,89 @@ type MainWindow() as this =
 
     member private this.InitializeComponent() =
         AvaloniaXamlLoader.Load(this)
+        // The "?" beside one of the app's own techniques: what it is, in a few words, in a small window of its own.
+        for name, pick in [ "AmlWhatIs", (fun (m: MainViewModel) -> m.Text.AdaptiveLearning, m.Text.WhatIsAml)
+                            "AfsWhatIs", (fun (m: MainViewModel) -> m.Text.AdaptiveFlow, m.Text.WhatIsAfs) ] do
+            let button = this.FindControl<Button>(name)
+            if not (isNull button) then
+                button.Click.Add(fun _ ->
+                    match this.DataContext with
+                    | :? MainViewModel as model -> this.ShowWhatIs(pick model)
+                    | _ -> ())
+        // Crop input's boxes take digits only (round 43).
+        for name in [ "CropLeftBox"; "CropTopBox"; "CropRightBox"; "CropBottomBox" ] do
+            let box = this.FindControl<TextBox>(name)
+            if not (isNull box) then
+                box.AddHandler(InputElement.TextInputEvent, (fun _ (args: TextInputEventArgs) ->
+                    if not (isNull args.Text) && args.Text |> Seq.exists (fun c -> not (System.Char.IsDigit c)) then args.Handled <- true),
+                               Avalonia.Interactivity.RoutingStrategies.Tunnel)
+        // Super Video (round 48): the videos to make, and the folder they go to - picked, never assumed.
+        let videoModel () = match this.DataContext with | :? MainViewModel as model -> Some model | _ -> None
+        let addButton = this.FindControl<Button>("VideoAddButton")
+        if not (isNull addButton) then
+            addButton.Click.Add(fun _ ->
+                match videoModel () with
+                | Some model ->
+                    task {
+                        let videos = FilePickerFileType("Video", Patterns = [| "*.mp4"; "*.mkv"; "*.mov"; "*.avi"; "*.wmv"; "*.webm"; "*.m4v"; "*.ts"; "*.mts"; "*.m2ts"; "*.flv" |])
+                        let options = FilePickerOpenOptions(Title = model.Text.VideoAdd, AllowMultiple = true, FileTypeFilter = [| videos; FilePickerFileTypes.All |])
+                        let! files = this.StorageProvider.OpenFilePickerAsync(options)
+                        files
+                        |> Seq.choose (fun f -> match f.TryGetLocalPath() with | null -> None | path -> Some path)
+                        |> model.Video.AddPaths
+                    } |> ignore
+                | None -> ())
+        // (Videos dropped on the page are added the same way.)
+        let videoCard = this.FindControl<Border>("VideoCard")
+        if not (isNull videoCard) then
+            DragDrop.SetAllowDrop(videoCard, true)
+            videoCard.AddHandler(DragDrop.DropEvent, (fun _ (args: DragEventArgs) ->
+                match videoModel (), args.DataTransfer.TryGetFiles() with
+                | Some model, files when not (isNull files) && not model.Video.IsRunning ->
+                    files
+                    |> Seq.choose (fun f -> match f.TryGetLocalPath() with | null -> None | path -> Some path)
+                    |> model.Video.AddPaths
+                | _ -> ()))
+        let folderButton = this.FindControl<Button>("VideoFolderButton")
+        if not (isNull folderButton) then
+            folderButton.Click.Add(fun _ ->
+                match videoModel () with
+                | Some model ->
+                    task {
+                        let options = FolderPickerOpenOptions(Title = model.Text.VideoChooseFolder, AllowMultiple = false)
+                        let! folders = this.StorageProvider.OpenFolderPickerAsync(options)
+                        match folders |> Seq.tryHead |> Option.bind (fun f -> match f.TryGetLocalPath() with | null -> None | path -> Some path) with
+                        | Some path -> model.Video.SetFolder path
+                        | None -> ()
+                    } |> ignore
+                | None -> ())
+        // Performance (DLSS MFG's preset C) picked: why it is not advised, in the same small window.
+        let mutable heard = null
+        this.DataContextChanged.Add(fun _ ->
+            match this.DataContext with
+            | :? MainViewModel as model when not (obj.ReferenceEquals(heard, model)) ->
+                heard <- model
+                model.PresetCPicked.Add(fun () -> this.ShowWhatIs(model.Text.PresetPerformance, model.Text.PresetCWarning))
+            | _ -> ())
+
+    member private this.ShowWhatIs(title: string, text: string) =
+        let panel = StackPanel(Spacing = 16.0, Margin = Thickness(24.0, 20.0, 24.0, 20.0))
+        panel.Children.Add(TextBlock(Text = title, FontSize = 18.0, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap))
+        panel.Children.Add(TextBlock(Text = text, FontSize = 14.0, TextWrapping = TextWrapping.Wrap, MaxWidth = 400.0))
+        let ok = Button(Content = "OK", MinWidth = 96.0, HorizontalAlignment = Layout.HorizontalAlignment.Right, HorizontalContentAlignment = Layout.HorizontalAlignment.Center)
+        ok.Classes.Add "primary"
+        panel.Children.Add ok
+        let dialog =
+            Window(Title = title, Content = panel, SizeToContent = SizeToContent.WidthAndHeight, CanResize = false,
+                   ShowInTaskbar = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                   FlowDirection = this.FlowDirection, RequestedThemeVariant = this.ActualThemeVariant, Icon = this.Icon)
+        dialog.Name <- "WhatIsWindow"
+        // (The app's own card colour, as its pages have it, in its light and dark look.)
+        match this.TryFindResource("SurfaceBrush", this.ActualThemeVariant) with
+        | true, (:? IBrush as brush) -> dialog.Background <- brush
+        | _ -> ()
+        ok.Click.Add(fun _ -> dialog.Close())
+        dialog.ShowDialog(this) |> ignore
 
     member private _.UpdateMaterial() =
         let level = this.ActualTransparencyLevel
