@@ -80,12 +80,42 @@ type MainWindow() as this =
                     | :? MainViewModel as model -> this.ShowWhatIs(pick model)
                     | _ -> ())
         // Crop input's boxes take digits only (round 43).
-        for name in [ "CropLeftBox"; "CropTopBox"; "CropRightBox"; "CropBottomBox" ] do
-            let box = this.FindControl<TextBox>(name)
+        // Round 55: Enter or Escape leaves such a box, and so does a click anywhere else (Avalonia keeps the caret
+        // in it otherwise); what it would not take is put back to what is kept.
+        let leave () = this.Focusable <- true; this.Focus() |> ignore
+        for name in [ "CropLeftBox"; "CropTopBox"; "CropRightBox"; "CropBottomBox"; "GameFpsBox"; "AdaptiveFpsBox" ] do
+            let box = this.FindControl<Control>(name)
             if not (isNull box) then
                 box.AddHandler(InputElement.TextInputEvent, (fun _ (args: TextInputEventArgs) ->
                     if not (isNull args.Text) && args.Text |> Seq.exists (fun c -> not (System.Char.IsDigit c)) then args.Handled <- true),
                                Avalonia.Interactivity.RoutingStrategies.Tunnel)
+                box.AddHandler(InputElement.KeyDownEvent, (fun _ (args: KeyEventArgs) ->
+                    if args.Key = Key.Enter || args.Key = Key.Escape then
+                        leave ()
+                        args.Handled <- true),
+                               Avalonia.Interactivity.RoutingStrategies.Tunnel)
+                box.LostFocus.Add(fun _ ->
+                    Dispatcher.UIThread.Post(fun () ->
+                        match this.DataContext, box with
+                        | (:? MainViewModel as model), _ when box.IsKeyboardFocusWithin -> ()
+                        | (:? MainViewModel as model), (:? NumericUpDown as spin) -> spin.Value <- model.AdaptiveTarget
+                        | (:? MainViewModel as model), (:? TextBox as text) ->
+                            text.Text <-
+                                match name with
+                                | "GameFpsBox" -> model.GameFpsText
+                                | "CropLeftBox" -> model.CropLeftText
+                                | "CropTopBox" -> model.CropTopText
+                                | "CropRightBox" -> model.CropRightText
+                                | _ -> model.CropBottomText
+                        | _ -> ()))
+        this.AddHandler(InputElement.PointerPressedEvent, (fun _ (args: PointerPressedEventArgs) ->
+            match this.FocusManager.GetFocusedElement(), args.Source with
+            | (:? TextBox), (:? Visual as source) ->
+                // (A click in a box, this one or another, leaves the caret to it.)
+                let inBox = Avalonia.VisualTree.VisualExtensions.FindAncestorOfType<TextBox>(source, true)
+                if isNull inBox then leave ()
+            | _ -> ()),
+                        Avalonia.Interactivity.RoutingStrategies.Tunnel, true)
         // Super Video (round 48): the videos to make, and the folder they go to - picked, never assumed.
         let videoModel () = match this.DataContext with | :? MainViewModel as model -> Some model | _ -> None
         let addButton = this.FindControl<Button>("VideoAddButton")

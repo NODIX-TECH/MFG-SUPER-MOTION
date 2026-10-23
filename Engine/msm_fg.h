@@ -535,6 +535,25 @@ bool Changed(float2 uv, float2 word, float3 seen)
            Most(abs(t1.SampleLevel(lin, uv + 0.5f * way, 0).rgb - seen)) >= n.y || Most(abs(t0.SampleLevel(lin, uv - 0.5f * way, 0).rgb - seen)) >= n.y;
 }
 
+// Round 53: a read-out one sees through - GTA V's wanted stars, a thin crosshair, a panel - is not the same colour in
+// both frames when the picture behind it moves: its pixel is part read-out, part picture. What is the same is its
+// shape: the pixel against the four around it (its edge, its outline) stays where it is, in both frames, while the
+// moving picture's own edges move. (Users' footage: the stars broke into pieces and dragged with the picture, the
+// counter beside them left a trace.) A pixel whose edge is clear and is the same in both frames counts as staying,
+// as one of the same colour does; it is drawn as both frames have it, where it is (WarpMain).
+float Edge(Texture2D<float4> t, int2 p)
+{
+    // (The four beside it: the eight cost the pair a fifth of a millisecond more at 1440p, for the same answer.)
+    const float around = dot(t.Load(int3(p + int2(-1, 0), 0)).rgb + t.Load(int3(p + int2(1, 0), 0)).rgb +
+                             t.Load(int3(p + int2(0, -1), 0)).rgb + t.Load(int3(p + int2(0, 1), 0)).rgb, kLuma);
+    return dot(t.Load(int3(p, 0)).rgb, kLuma) - around * 0.25f;
+}
+bool ShapeStays(int2 p)
+{
+    const float e0 = Edge(t0, p), e1 = Edge(t1, p);
+    return abs(e0) > 0.1f && abs(e1) > 0.1f && abs(e0 - e1) < 0.15f * max(abs(e0), abs(e1));
+}
+
 [numthreads(8, 8, 1)]
 void MarkMain(uint3 id : SV_DispatchThreadID)
 {
@@ -542,7 +561,7 @@ void MarkMain(uint3 id : SV_DispatchThreadID)
     const uint was = landed_a.Load(int3(id.xy, 0));
     const uint learnt = was & 64u;
     uint count = learnt != 0u ? (was & 63u) : 0u;
-    if (Most(abs(a - b)) < n.x)
+    if (Most(abs(a - b)) < n.x || ShapeStays(int2(id.xy)))
     {
         count = was & 63u;
         const float2 uv = (id.xy + 0.5f) * inv_out;
@@ -773,6 +792,37 @@ void EdgeMain(uint3 id : SV_DispatchThreadID)
 )hlsl" R"hlsl(
 // ---- 7. draw
 
+// Round 56: a frame read between its pixels - by Catmull-Rom (nine reads of the card's own filtering) where inv_a
+// is its texel, plainly between the four nearest where it is 0 (as before). Read plainly, a frame moved by half a
+// pixel loses its finest detail: SMFG's frames kept 42 to 86% of a real frame's (the finest changes' energy, the
+// user's footage), the real frames between them all of theirs - detail coming and going four times out of five at
+// x6, "waves" over the world.
+float3 Between(Texture2D<float4> t, float2 uv)
+{
+    if (inv_a.x <= 0.0f) return t.SampleLevel(lin, uv, 0).rgb;
+    const float2 size = 1.0f / inv_a;
+    const float2 at = uv * size;
+    const float2 one = floor(at - 0.5f) + 0.5f;
+    const float2 f = at - one;
+    const float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
+    const float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
+    const float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
+    const float2 w3 = f * f * (-0.5f + 0.5f * f);
+    const float2 w12 = w1 + w2;
+    const float2 p0 = (one - 1.0f) * inv_a, p3 = (one + 2.0f) * inv_a, p12 = (one + w2 / w12) * inv_a;
+    float3 c = 0.0f;
+    c += t.SampleLevel(lin, float2(p0.x, p0.y), 0).rgb * w0.x * w0.y;
+    c += t.SampleLevel(lin, float2(p12.x, p0.y), 0).rgb * w12.x * w0.y;
+    c += t.SampleLevel(lin, float2(p3.x, p0.y), 0).rgb * w3.x * w0.y;
+    c += t.SampleLevel(lin, float2(p0.x, p12.y), 0).rgb * w0.x * w12.y;
+    c += t.SampleLevel(lin, float2(p12.x, p12.y), 0).rgb * w12.x * w12.y;
+    c += t.SampleLevel(lin, float2(p3.x, p12.y), 0).rgb * w3.x * w12.y;
+    c += t.SampleLevel(lin, float2(p0.x, p3.y), 0).rgb * w0.x * w3.y;
+    c += t.SampleLevel(lin, float2(p12.x, p3.y), 0).rgb * w12.x * w3.y;
+    c += t.SampleLevel(lin, float2(p3.x, p3.y), 0).rgb * w3.x * w3.y;
+    return saturate(c);
+}
+
 // A pixel of the frame in between under one word r (the movement, the frame after's share): from the two frames,
 // a mark never taken for the picture sought. The rest of WarpMain's own numbers as it has them.
 float3 Draw(uint2 id, float2 uv, float4 r)
@@ -795,9 +845,31 @@ float3 Draw(uint2 id, float2 uv, float4 r)
         else if (mark_b) share = 0.0f;
     }
     if (rests) return lerp(t0.Load(int3(id, 0)).rgb, t1.Load(int3(id, 0)).rgb, k.x);
-    if (share <= 0.0f) return t0.SampleLevel(lin, uv_a, 0).rgb;
-    if (share >= 1.0f) return t1.SampleLevel(lin, uv_b, 0).rgb;
-    const float3 from_a = t0.SampleLevel(lin, uv_a, 0).rgb, from_b = t1.SampleLevel(lin, uv_b, 0).rgb;
+    // Round 53: is what each frame shows there going this way at all? A thing standing on the screen while the
+    // picture behind it moves - the player's head in a turn - covers, in one of the frames, the piece of picture
+    // that goes past it: the movement carried that frame's pixel of the head into the moving picture beside it
+    // (users' "ghosting on heads", seen in their own GTA V footage: blots of the head's colour beside it). The
+    // frame before's own word where the pixel is taken from (t4: its blocks, found) says where that pixel goes; if
+    // it is found going clearly another way, it is not this piece of picture, and the frame after's is taken - and
+    // the other way round (t5: the frame after's blocks, back).
+    if (dot(pixels, pixels) > 0.5f)
+    {
+        const float2 blocks = m.xy;                     // the blocks across and down (the same grid as t4, t5)
+        const float4 from_a = t4.Load(int3(clamp(int2(uv_a * blocks), int2(0, 0), int2(blocks) - 1), 0));
+        const float4 from_b = t5.Load(int3(clamp(int2(uv_b * blocks), int2(0, 0), int2(blocks) - 1), 0));
+        const float reach = max(1.5f, 0.3f * length(r.xy));
+        // (What is wrong is a thing going clearly slower than the place - standing on the screen, as a head, a hand,
+        // a weapon, the car from behind; in a turn too fast for the words they say anything, and switching frames
+        // there only made the pieces sharper.)
+        const float pace = length(r.xy);
+        const bool wrong_a = from_a.z > 0.5f && length(from_a.xy - r.xy) > reach && length(from_a.xy) < 0.5f * pace;
+        const bool wrong_b = from_b.z > 0.5f && length(from_b.xy + r.xy) > reach && length(from_b.xy) < 0.5f * pace;
+        if (wrong_a && !wrong_b) share = 1.0f;
+        else if (wrong_b && !wrong_a) share = 0.0f;
+    }
+    if (share <= 0.0f) return Between(t0, uv_a);
+    if (share >= 1.0f) return Between(t1, uv_b);
+    const float3 from_a = Between(t0, uv_a), from_b = Between(t1, uv_b);
     // They do not show the same: nearer to the nearer one, not a double picture.
     share = lerp(share, step(0.5f, share), saturate((dot(abs(from_a - from_b), kLuma) - n.z) * n.w));
     return lerp(from_a, from_b, share);
@@ -821,10 +893,11 @@ void WarpMain(uint3 id : SV_DispatchThreadID)
     // piece of a wall or a tree taken for one (Adaptive Motion Learning's read-outs, learnt wrongly) does not, and
     // is drawn as the rest of the picture is - not a square standing while everything around it moves.
     bool held = (landed_a.Load(int3(id.xy, 0)) & 128u) != 0u;
-    if (held && k.w > 0.0f) held = dot(abs(t0.Load(int3(id.xy, 0)).rgb - t1.Load(int3(id.xy, 0)).rgb), kLuma) <= k.w;
+    if (held && k.w > 0.0f) held = dot(abs(t0.Load(int3(id.xy, 0)).rgb - t1.Load(int3(id.xy, 0)).rgb), kLuma) <= k.w || ShapeStays(int2(id.xy));
     if (held)
     {
-        colour = t0.Load(int3(id.xy, 0)).rgb;
+        // (Both frames where it is, by the moment: a read-out one sees through shows the picture behind it changing.)
+        colour = lerp(t0.Load(int3(id.xy, 0)).rgb, t1.Load(int3(id.xy, 0)).rgb, k.x);
     }
     else
     {
@@ -931,18 +1004,18 @@ void WarpMain(uint3 id : SV_DispatchThreadID)
 struct MsmTune
 {
     float search_far = 0.05f;       // SearchMain: what a texel further costs
-    float refine_far = 0.02f;       // RefineMain: what a texel away from the block's own word below costs
-    float refine_plain = 0.06f;     // ... and what more it costs a block that shows nothing itself
+    float refine_far = 0.01f;       // (round 55, tuned on five games' footage: 0.02) RefineMain: what a texel away from the block's own word below costs
+    float refine_plain = 0.03f;     // (0.06) ... and what more it costs a block that shows nothing itself
     float relax_far = 0.1f;         // RelaxMain: what a texel away from the blocks around costs
     int relax_small = 4;            // RelaxMain: how often, the two smallest sizes
     int relax_mid = 2;              // ... the two between
     int relax_large = 2;            // ... the largest
-    float sure_gain = 4.0f;         // a block with this much contrast (1 / it) counts in full
+    float sure_gain = 8.0f;         // (4) a block with this much contrast (1 / it) counts in full
     float sure_floor = 0.05f;       // ... and found: it differs by less than its contrast and this
     float found_floor = 0.12f;      // SubpelMain: a block found differs by no more than this ...
     float found_contrast = 0.35f;   // ... and this for each step of its own contrast
     float back_floor = 1.5f;        // ... and its way back misses home by no more than this, texels
-    float back_far = 0.1f;          // ... and this for each texel of the way
+    float back_far = 0.2f;          // (0.1) ... and this for each texel of the way
     float far_reach = 14.0f;        // FarMain: a block not found is looked for within so many texels of the second largest size ...
     float far_share = 0.35f;        // ... and takes what fits to this share of what it is off by now ...
     float far_floor = 0.02f;        // ... less this
@@ -950,7 +1023,7 @@ struct MsmTune
     float cross_floor = 0.02f;      // ... and takes where that fits better by this ...
     float cross_share = 0.7f;       // ... and to this share of how far its own is off
     float shows_floor = 0.01f;      // SubpelMain: a block shows something from this much contrast on ...
-    float shows_gain = 6.0f;        // ... in full from 1 / this more
+    float shows_gain = 12.0f;       // (6) ... in full from 1 / this more
     float fill_say = 0.05f;         // FillMain: a block that shows little goes by the picture at large where this share of the blocks around has a say
     float alias_ratio = 1.15f;      // ... and one that the picture's word explains nearly as well as its own takes the picture's: so many times as far apart
     float alias_floor = 0.03f;      // ... and this much more (nine places' brightness, summed), at most. alias_ratio 0: not asked
@@ -986,6 +1059,9 @@ struct MsmTune
     float fluid_share = 0.25f;      // ... and this share of their size count as the same movement when the field is made smooth
     float alone_near = 1.5f;        // EdgeMain, SMFG 1.1: a word alone among seven that agree (within this, texels ...
     float alone_share = 0.15f;      // ... and this share of their movement) takes theirs (alone_near 0: not asked, as 1.0)
+    float fluid_apart = 0.2f;       // round 56, fluid: the two frames this far apart at a pixel under its word lean to the nearer one ...
+    float fluid_steep = 0.0f;       // ... wholly from fluid_apart + 1 / this on (0: never - two pictures laid over each other, as round 39 to 55)
+    float sharp_read = 1.0f;        // round 56, Draw: 1 the frames read between their pixels by Catmull-Rom (Between), 0 plainly (detail kept 57 -> 70%, 42 -> 57%, 62 -> 75% on the user's footage; error the same; 0.01 ms a pair)
 };
 
 static struct MsmState
@@ -1072,6 +1148,42 @@ static void MsmForget()
     g_msm.chained = false;
 }
 
+// SM_MSM_TUNE's text (name=value,...) into the numbers - also tests\msmdata.exe's tunes=, one line a try.
+static void MsmTuneRead(MsmTune &t, char *text)
+{
+    struct { const char *name; float *value; int *whole; } names[] = {
+        {"search_far", &t.search_far}, {"refine_far", &t.refine_far}, {"refine_plain", &t.refine_plain}, {"relax_far", &t.relax_far},
+        {"relax_small", nullptr, &t.relax_small}, {"relax_mid", nullptr, &t.relax_mid}, {"relax_large", nullptr, &t.relax_large},
+        {"sure_gain", &t.sure_gain}, {"sure_floor", &t.sure_floor},
+        {"found_floor", &t.found_floor}, {"found_contrast", &t.found_contrast},
+        {"back_floor", &t.back_floor}, {"back_far", &t.back_far},
+        {"cross", &t.cross}, {"cross_floor", &t.cross_floor}, {"cross_share", &t.cross_share},
+        {"far_reach", &t.far_reach}, {"far_share", &t.far_share}, {"far_floor", &t.far_floor},
+        {"shows_floor", &t.shows_floor}, {"shows_gain", &t.shows_gain}, {"fill_say", &t.fill_say}, {"alias_ratio", &t.alias_ratio}, {"alias_floor", &t.alias_floor},
+        {"large_near", &t.large_near}, {"large_far", &t.large_far},
+        {"same", &t.same}, {"differs", &t.differs}, {"mark_pairs", &t.mark_pairs},
+        {"mark_most", &t.mark_most}, {"mark_moves", &t.mark_moves}, {"apart", &t.apart}, {"apart_steep", &t.apart_steep},
+        {"large_floor", &t.large_floor}, {"large_share", &t.large_share},
+        {"nearer_from", &t.nearer_from}, {"nearer_to", &t.nearer_to}, {"edge", &t.edge},
+        {"soft", &t.soft}, {"alone_near", &t.alone_near}, {"alone_share", &t.alone_share},
+        {"fluid", &t.fluid}, {"fluid_near", &t.fluid_near}, {"fluid_share", &t.fluid_share}, {"direct", &t.direct}, {"mark_holds", &t.mark_holds},
+        {"one_sided", &t.one_sided}, {"nearer_word", &t.nearer_word}, {"mixed_fits", &t.mixed_fits},
+        {"fluid_apart", &t.fluid_apart}, {"fluid_steep", &t.fluid_steep}, {"sharp_read", &t.sharp_read} };
+    char *next = nullptr;
+    for (char *part = strtok_s(text, ",", &next); part; part = strtok_s(nullptr, ",", &next))
+    {
+        char *eq = strchr(part, '=');
+        if (!eq) continue;
+        *eq = 0;
+        for (auto &name : names)
+            if (_stricmp(part, name.name) == 0)
+            {
+                if (name.value) *name.value = static_cast<float>(atof(eq + 1));
+                else *name.whole = std::clamp(atoi(eq + 1), 0, 8);
+            }
+    }
+}
+
 // The passes (made once) and what they work in, for pictures of this size and frames in between written in
 // this format. share: "Flow", percent. False: there are no frames in between of this generator's.
 static bool MsmReady(UINT full_w, UINT full_h, DXGI_FORMAT format, int share)
@@ -1090,36 +1202,7 @@ static bool MsmReady(UINT full_w, UINT full_h, DXGI_FORMAT format, int share)
         char tune[512] = {};
         if (GetEnvironmentVariableA("SM_MSM_TUNE", tune, sizeof(tune)) > 0)
         {
-            struct { const char *name; float *value; int *whole; } names[] = {
-                {"search_far", &s.tune.search_far}, {"refine_far", &s.tune.refine_far}, {"refine_plain", &s.tune.refine_plain}, {"relax_far", &s.tune.relax_far},
-                {"relax_small", nullptr, &s.tune.relax_small}, {"relax_mid", nullptr, &s.tune.relax_mid}, {"relax_large", nullptr, &s.tune.relax_large},
-                {"sure_gain", &s.tune.sure_gain}, {"sure_floor", &s.tune.sure_floor},
-                {"found_floor", &s.tune.found_floor}, {"found_contrast", &s.tune.found_contrast},
-                {"back_floor", &s.tune.back_floor}, {"back_far", &s.tune.back_far},
-                {"cross", &s.tune.cross}, {"cross_floor", &s.tune.cross_floor}, {"cross_share", &s.tune.cross_share},
-                {"far_reach", &s.tune.far_reach}, {"far_share", &s.tune.far_share}, {"far_floor", &s.tune.far_floor},
-                {"shows_floor", &s.tune.shows_floor}, {"shows_gain", &s.tune.shows_gain}, {"fill_say", &s.tune.fill_say}, {"alias_ratio", &s.tune.alias_ratio}, {"alias_floor", &s.tune.alias_floor},
-                {"large_near", &s.tune.large_near}, {"large_far", &s.tune.large_far},
-                {"same", &s.tune.same}, {"differs", &s.tune.differs}, {"mark_pairs", &s.tune.mark_pairs},
-                {"mark_most", &s.tune.mark_most}, {"mark_moves", &s.tune.mark_moves}, {"apart", &s.tune.apart}, {"apart_steep", &s.tune.apart_steep},
-                {"large_floor", &s.tune.large_floor}, {"large_share", &s.tune.large_share},
-                {"nearer_from", &s.tune.nearer_from}, {"nearer_to", &s.tune.nearer_to}, {"edge", &s.tune.edge},
-                {"soft", &s.tune.soft}, {"alone_near", &s.tune.alone_near}, {"alone_share", &s.tune.alone_share},
-                {"fluid", &s.tune.fluid}, {"fluid_near", &s.tune.fluid_near}, {"fluid_share", &s.tune.fluid_share}, {"direct", &s.tune.direct}, {"mark_holds", &s.tune.mark_holds},
-                {"one_sided", &s.tune.one_sided}, {"nearer_word", &s.tune.nearer_word}, {"mixed_fits", &s.tune.mixed_fits} };
-            char *next = nullptr;
-            for (char *part = strtok_s(tune, ",", &next); part; part = strtok_s(nullptr, ",", &next))
-            {
-                char *eq = strchr(part, '=');
-                if (!eq) continue;
-                *eq = 0;
-                for (auto &name : names)
-                    if (_stricmp(part, name.name) == 0)
-                    {
-                        if (name.value) *name.value = static_cast<float>(atof(eq + 1));
-                        else *name.whole = std::clamp(atoi(eq + 1), 0, 8);
-                    }
-            }
+            MsmTuneRead(s.tune, tune);
         }
         winrt::com_ptr<ID3DBlob> signature, errors;
         D3D12_DESCRIPTOR_RANGE ranges[2] = {{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0}, {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0}};
@@ -1635,16 +1718,18 @@ static void MsmFrame(ID3D12GraphicsCommandList *list, ID3D12Resource *before, ID
         MsmPass p;
         p.state = s.warp.get();
         p.read[0] = before; p.read[1] = after; p.read[2] = s.resolved.get(); p.read[3] = s.large[0].get();
+        p.read[4] = s.flow[0].get(); p.read[5] = s.flow[1].get();     // (round 53: whether what each frame shows goes this way)
         p.reached[0] = s.marks[s.marks_now].get();
         p.write = into; p.own = false;
-        p.inv_a[0] = 1.0f / s.full_w; p.inv_a[1] = 1.0f / s.full_h;
+        // (inv_a: the frames' texel for Draw's reading between pixels - Between - or 0, read plainly.)
+        p.inv_a[0] = s.tune.sharp_read > 0.0f ? 1.0f / s.full_w : 0.0f; p.inv_a[1] = s.tune.sharp_read > 0.0f ? 1.0f / s.full_h : 0.0f;
         p.w = s.full_w; p.h = s.full_h;
         p.k[0] = moment;
         p.k[1] = static_cast<float>(s.full_w) / s.w; p.k[2] = static_cast<float>(s.full_h) / s.h;
         p.k[3] = s.tune.mark_holds;
         p.n[0] = s.tune.soft;
         p.n[1] = s.tune.fluid;
-        p.n[2] = s.tune.apart; p.n[3] = s.tune.fluid > 0.0f ? 0.0f : s.tune.apart_steep;
+        p.n[2] = s.tune.fluid > 0.0f ? s.tune.fluid_apart : s.tune.apart; p.n[3] = s.tune.fluid > 0.0f ? s.tune.fluid_steep : s.tune.apart_steep;
         p.o[0] = s.tune.nearer_from; p.o[1] = s.tune.nearer_to; p.o[2] = s.tune.edge; p.o[3] = s.tune.one_sided;
         p.m[0] = static_cast<float>(s.bw[0]); p.m[1] = static_cast<float>(s.bh[0]); p.m[2] = s.tune.nearer_word; p.m[3] = s.tune.mixed_fits;
         MsmRecord(list, p);

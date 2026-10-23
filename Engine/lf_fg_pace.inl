@@ -51,6 +51,9 @@ struct FgPace
     unsigned pairs = 0, late = 0, skipped = 0, dropped = 0;
     // The usual time between two real frames.
     double usual = 0.0;
+    // Round 56, Adaptive MFG: the delay covers every pair of the last ones, not 97 in a hundred - a beat that
+    // passes before its pair comes is a hole of three or four beats, the uneven step Adaptive is there to end.
+    bool cover_all = false;
 
     void Forget() { count = next = 0; delay = 0.0; settled = false; }
 
@@ -77,7 +80,7 @@ struct FgPace
         std::sort(sorted, sorted + count);
         const unsigned queue = FgQueueTarget();
         if (queue == 0) return sorted[count / 2];
-        if (queue == 1) return sorted[std::min(count - 1, static_cast<unsigned>(0.97 * (count - 1) + 0.5))] + 0.0005;
+        if (queue == 1) return cover_all ? sorted[count - 1] + 0.0005 : sorted[std::min(count - 1, static_cast<unsigned>(0.97 * (count - 1) + 0.5))] + 0.0005;
         return sorted[count - 1] + 0.5 * step;
     }
 
@@ -303,6 +306,13 @@ static void FgGateForget()
 // believes the stamp; a frame the game left out (twice the time, or three
 // times) moves the clock on by whole frames, keeping the beat; anything else
 // that far off is another pace and starts it again.
+// Round 56: how far a frame's stamp may lie off the beat and still be on it, a share of a frame. A quarter until now -
+// and a user's GTA V came 12, 21, 33, 12, 21, 33 ms apart (24.5 on average, frames.log): two of three frames were
+// "odd" and shown at their stamps, a pair's frames 2 ms apart, the next one's 3.5, the next 5.5 - the picture
+// stepping up and down where Lossless Scaling's goes on evenly. Frames the game left out (whole frames later) and
+// a pace that changed for good are told as before.
+static constexpr double kClockHold = 0.6;
+
 static struct FgClock
 {
     double moment = 0.0, before = 0.0;   // this real frame's and the one before it
@@ -328,7 +338,7 @@ static struct FgClock
             const double slack = std::max(grid, 0.25 * every);
             const double off = stamp - (moment + every);
             const double beats = std::round(off / every);
-            if (std::fabs(off) <= slack) moment += every + 0.05 * off;
+            if (std::fabs(off) <= std::max(slack, kClockHold * every)) moment += every + 0.05 * off;
             else if (beats >= 1.0 && beats <= 3.0 && std::fabs(off - beats * every) <= slack) moment += (1.0 + beats) * every + 0.05 * (off - beats * every);
             else moment = stamp;
             if (moment <= before) moment = stamp > before ? stamp : before + 0.001;
@@ -375,7 +385,9 @@ static struct FgClock
         // Left-out frames: whole beats later.
         const double beats = std::round(off / every);
         const double rest = off - beats * every;
-        if (std::fabs(off) <= slack)
+        // (Round 56: also while the pace is being learnt - held to one refresh then, a game whose frames come 12, 21,
+        // 33 ms apart never got through its first thirty: every frame "another pace", the clock its stamps.)
+        if (std::fabs(off) <= std::max(slack, kClockHold * every))
         {
             // On the beat: the pace follows the frames slowly, the clock the stamps slowly.
             every += (known < 30 ? 0.1 : 0.03) * (span - every);
@@ -391,7 +403,11 @@ static struct FgClock
         else if (++off_beat >= 3 || known < 30 || std::fabs(off) > 3.5 * every)
         {
             // Another pace (a limit set, another scene's load): learnt again from here.
-            every = span > 0.0015 && span < 0.25 ? span : every;
+            // (Round 56: the last frames' average where there are four - one span of an uneven game is no pace.)
+            double recent = 0.0;
+            for (unsigned i = 0; i < filled; ++i) recent += spans[i];
+            recent = filled >= 4 ? recent / filled : span;
+            every = recent > 0.0015 && recent < 0.25 ? recent : every;
             known = 1; off_beat = 0;
             moment = stamp;
         }

@@ -61,6 +61,12 @@ type UiText =
       VideoDone: string; VideoStopped: string; VideoFailed: string; VideoStopMotionFirst: string; VideoNote: string
       // Round 49: the sidebar's "More" (Super Video, App Mods) and the Help page's button that opens the guide.
       NavMore: string; HelpGuide: string
+      // Round 52: SMFG AI - its switch, and what it is and costs.
+      SmfgAi: string; SmfgAiHelp: string
+      // Round 53, Adaptive MFG: its target's name, what an empty one means, and what it does.
+      AdaptiveTarget: string; AdaptiveScreen: string; AdaptiveHelp: string
+      // Round 54: the multiplier's own row (Mode is now Fixed or Adaptive).
+      Multiplier: string
       // Round 43: multi-display mode, Crop input (each side's box) and the pointer's options; what they are for.
       MultiDisplay: string; MultiDisplayHelp: string; CropInput: string; CropHelp: string; CropLeft: string; CropTop: string
       CropRight: string; CropBottom: string; Cursor: string; CursorClip: string; CursorSpeed: string; CursorHide: string

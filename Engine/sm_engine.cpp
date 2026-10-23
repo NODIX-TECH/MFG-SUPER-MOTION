@@ -95,6 +95,7 @@
 #include "capture_shortcuts.inl"
 #include "lf_show_relay.inl"
 #include "lf_window_fill.inl"
+#include "sm_front.inl"
 #include "lf_vrr.inl"
 #include "lf_latency.inl"
 #include "lf_counter.inl"

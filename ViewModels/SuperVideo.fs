@@ -62,7 +62,7 @@ type SuperVideoModel(text: unit -> UiText, post: (unit -> unit) -> unit, liveAct
     let sizes = [| for _ in heights -> VideoChoice("") |]
     let upscalers = [| VideoChoice("Lanczos"); VideoChoice(""); VideoChoice("Anime4K"); VideoChoice("Integer"); VideoChoice("Nearest Neighbor") |]
     let codecs = [| VideoChoice("H.264"); VideoChoice("HEVC (H.265)") |]
-    let techniques = [| VideoChoice("SMFG"); VideoChoice("") |]
+    let techniques = [| VideoChoice("SMFG"); VideoChoice(""); VideoChoice("SMFG AI") |]
     let mutable folder = ""
     let mutable running: VideoRun option = None
     let mutable stopping = false
@@ -165,7 +165,8 @@ type SuperVideoModel(text: unit -> UiText, post: (unit -> unit) -> unit, liveAct
                   Height = heights[max 0 (min (heights.Length - 1) item.SizeIndex)]
                   Codec = item.CodecIndex
                   Upscaler = upscalerKinds[max 0 (min (upscalerKinds.Length - 1) item.UpscalerIndex)]
-                  Search = item.TechniqueIndex }
+                  Search = (if item.TechniqueIndex = 1 then 1 else 0)
+                  Ai = (item.TechniqueIndex = 2) }
             item.State <- 1
             item.Progress <- 0.0
             item.Status <- String.Format(t.VideoWorking, 0)

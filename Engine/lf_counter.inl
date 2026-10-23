@@ -67,6 +67,15 @@ static void CounterLook()
 }
 
 // After every Present of the output (lf_vrr.inl). real: a real frame's first.
+// Round 56, Adaptive MFG: a pair shown by the beat counts as a frame of the game whether or not its real frame
+// falls on a beat (the counter read 15 to 33 for a game at 59 - most real frames lie between beats).
+static void CounterGameFrame(double source)
+{
+    CounterState &c = g_counter;
+    std::lock_guard<std::mutex> hold(c.lock);
+    if (source > 0.0 && source != c.last_source) { c.last_source = source; ++c.reals; }
+}
+
 static void CounterPresented(double source, bool own_capture)
 {
     CounterState &c = g_counter;

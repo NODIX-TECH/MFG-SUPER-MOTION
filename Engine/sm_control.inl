@@ -100,6 +100,7 @@ static unsigned ApplyOption(const char *key, const char *value)
     if (KeyIs(key, "still"))        { if (set(smOpt.still, 0, 1)) { Trace("[option] still pixels %s", number ? "kept" : "left to the generator"); return kRedoFg; } return 0; }
     if (KeyIs(key, "screen_limit")) { if (set(smOpt.screen_limit, 0, 1)) Trace("[option] frames in between %s", number ? "fill what room the screen has" : "as the multiplier says, whatever the screen shows"); return 0; }
     if (KeyIs(key, "guard"))        { if (set(smOpt.guard, 0, 1)) Trace("[option] fast motion guard %s", number ? "on" : "off"); return 0; }
+    if (KeyIs(key, "msm_ai"))       { if (set(smOpt.msm_ai, 0, 1)) Trace("[option] SMFG AI %s", number ? "on" : "off"); return 0; }
     if (KeyIs(key, "msm_search"))   { if (set(smOpt.msm_search, 0, 1)) Trace("[option] MSM FG's search: %s", number ? "the lighter one" : "in full"); return 0; }
     if (KeyIs(key, "aml"))          { if (set(smOpt.aml, 0, 1)) Trace("[option] Adaptive Motion Learning %s", number ? "on" : "off"); return 0; }
     // (What it changes - the size frames in between are made at - the loop sees for itself: sm_loop.inl.)
@@ -141,6 +142,14 @@ static unsigned ApplyOption(const char *key, const char *value)
         const int want = (number < 20 || number > 360) ? 0 : static_cast<int>(number);
         if (smOpt.frame_limit.exchange(want) != want)
             Trace(want ? "[limit] frame limit %d FPS" : "[limit] no frame limit", want);
+        return 0;
+    }
+    if (KeyIs(key, "adaptive"))
+    {
+        const int want = number == 1 ? 1 : (number < 30 || number > 1000) ? 0 : static_cast<int>(number);
+        if (smOpt.adaptive.exchange(want) != want)
+            Trace(want == 1 ? "[adaptive] Adaptive MFG: as many frames as the screen's refresh, evenly" :
+                  want ? "[adaptive] Adaptive MFG: %d frames a second, evenly" : "[adaptive] Adaptive MFG off", want);
         return 0;
     }
     if (KeyIs(key, "vrr"))          { if (set(smOpt.vrr, 0, 1)) Trace("[option] VRR %s", number ? "on" : "off"); return 0; }

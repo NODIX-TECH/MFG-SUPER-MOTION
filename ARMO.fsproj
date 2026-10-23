@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\armo.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <Company>NODIX TECH</Company>
     <RootNamespace>Mfg_Super_Motion</RootNamespace>
     <Authors>NODIX TECH</Authors>

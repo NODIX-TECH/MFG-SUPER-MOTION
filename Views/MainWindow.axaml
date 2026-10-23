@@ -99,7 +99,15 @@
                 </ui:SettingRow>
                 <ui:SettingRow>
                   <TextBlock Classes="row-label" Text="{Binding Text.Mode}" />
-                  <ComboBox Classes="row-control" ItemsSource="{Binding Modes}" SelectedIndex="{Binding ModeIndex, Mode=TwoWay}" IsEnabled="{Binding FrameGenerationEnabled}" AutomationProperties.Name="{Binding Text.Mode}" FlowDirection="LeftToRight" />
+                  <ComboBox Name="FrameModeBox" Classes="row-control" ItemsSource="{Binding FrameModes}" SelectedIndex="{Binding FrameModeIndex, Mode=TwoWay}" IsEnabled="{Binding FrameGenerationEnabled}" AutomationProperties.Name="{Binding Text.Mode}" FlowDirection="LeftToRight" />
+                </ui:SettingRow>
+                <ui:SettingRow IsVisible="{Binding IsFixed}">
+                  <TextBlock Classes="row-label" Text="{Binding Text.Multiplier}" />
+                  <ComboBox Name="MultiplierBox" Classes="row-control" ItemsSource="{Binding Modes}" SelectedIndex="{Binding ModeIndex, Mode=TwoWay}" IsEnabled="{Binding FrameGenerationEnabled}" AutomationProperties.Name="{Binding Text.Multiplier}" FlowDirection="LeftToRight" />
+                </ui:SettingRow>
+                <ui:SettingRow IsVisible="{Binding IsAdaptive}">
+                  <TextBlock Classes="row-label" Text="{Binding Text.AdaptiveTarget}" ToolTip.Tip="{Binding Text.AdaptiveHelp}" />
+                  <NumericUpDown Name="AdaptiveFpsBox" Classes="row-control target" Minimum="30" Maximum="1000" Increment="1" FormatString="0" ParsingNumberStyle="Integer" ClipValueToMinMax="False" AllowSpin="True" Value="{Binding AdaptiveTarget, Mode=TwoWay}" IsEnabled="{Binding FrameGenerationEnabled}" ToolTip.Tip="{Binding Text.AdaptiveHelp}" AutomationProperties.Name="{Binding Text.AdaptiveTarget}" FlowDirection="LeftToRight" />
                 </ui:SettingRow>
                 <ui:SettingRow IsVisible="{Binding IsDlss}">
                   <TextBlock Classes="row-label" Text="{Binding Text.DlssPreset}" />
@@ -188,9 +196,7 @@
                         </ui:SettingRow>
                         <ui:SettingRow>
                           <TextBlock Classes="row-label" Text="{Binding Text.GameFps}" ToolTip.Tip="{Binding Text.GameFpsHelp}" />
-                          <ComboBox Name="GameFpsBox" Classes="row-control" ItemsSource="{Binding GameFpsChoices}" SelectedIndex="{Binding GameFpsIndex, Mode=TwoWay}" ToolTip.Tip="{Binding Text.GameFpsHelp}" AutomationProperties.Name="{Binding Text.GameFps}">
-                            <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
-                          </ComboBox>
+                          <TextBox Name="GameFpsBox" Classes="crop" Width="120" HorizontalAlignment="Right" MaxLength="3" Text="{Binding GameFpsText, Mode=TwoWay}" PlaceholderText="{Binding Text.GameAuto}" ToolTip.Tip="{Binding Text.GameFpsHelp}" AutomationProperties.Name="{Binding Text.GameFps}" />
                         </ui:SettingRow>
                         <ui:SettingRow>
                           <TextBlock Classes="row-label" Text="{Binding Text.ScreenLimit}" />

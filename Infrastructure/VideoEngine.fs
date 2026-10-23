@@ -14,7 +14,8 @@ type VideoJob =
       Height: int         // 0 the video's own
       Codec: int          // 0 H.264, 1 HEVC
       Upscaler: int       // the engine's upscaler kinds (0 Lanczos, 1 sharpened, 2 integer, 3 nearest, 4 Anime4K)
-      Search: int }       // SMFG's search: 0 in full, 1 the lighter one
+      Search: int         // SMFG's search: 0 in full, 1 the lighter one
+      Ai: bool }          // round 52: SMFG AI - the frames made by the neural network (msm_ai.h)
 
 type VideoEvent =
     | Progress of made: int64 * total: int64
@@ -71,6 +72,7 @@ type VideoRun(job: VideoJob, report: VideoEvent -> unit) =
                       sprintf "video_codec=%d" job.Codec
                       sprintf "upscaler=%d" job.Upscaler
                       sprintf "msm_search=%d" job.Search
+                      sprintf "msm_ai=%d" (if job.Ai then 1 else 0)
                       "log=1" ]
                 File.WriteAllLines(file, lines, UTF8Encoding(false))
                 let info =

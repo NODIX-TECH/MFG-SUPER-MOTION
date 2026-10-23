@@ -33,9 +33,27 @@
 // it (DXGI frame statistics) - is summed up every two seconds as [latency].
 // Only DXGI: the same on NVIDIA, AMD and Intel.
 
+// Round 51: on AMD's cards, Low Latency is left out while frames are generated. Users with a Radeon (an RX 6600M
+// laptop: the game, the capture and the frames stopped two seconds in, with both captures, "whenever I turn off Low
+// Latency it works") - not seen on NVIDIA or Intel here. While frames are generated all it adds is a quicker thread
+// and a shorter wait for the capture's next frame (the presenter paces everything else either way), so on AMD's
+// cards that is what is given up.
 static bool LowLatencyWanted()
 {
-    return smOpt.low_latency.load() != 0;
+    if (smOpt.low_latency.load() == 0) return false;
+    static int amd = -1;
+    if (amd < 0 && lfCard.adapter != nullptr)
+    {
+        DXGI_ADAPTER_DESC1 desc = {};
+        amd = SUCCEEDED(lfCard.adapter->GetDesc1(&desc)) && desc.VendorId == 0x1002 ? 1 : 0;
+    }
+    if (amd == 1 && FgRequested())
+    {
+        static bool told = false;
+        if (!told) { told = true; Trace("[latency] Low Latency is left out on this AMD card while frames are generated (it froze the capture on Radeon cards)"); }
+        return false;
+    }
+    return true;
 }
 
 static struct LatencyState

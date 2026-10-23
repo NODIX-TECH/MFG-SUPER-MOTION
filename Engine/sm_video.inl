@@ -340,6 +340,16 @@ namespace supervideo
             if (FAILED(lfCore.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr, IID_PPV_ARGS(work.put()))))
             { Fail("no picture for the generator"); return 3; }
         }
+        // Round 52, SMFG AI (msm_ai.h): the network makes all of a pair's frames in between at once, each into a
+        // picture of its own; they are handed to the encoder one after the other.
+        com_ptr<ID3D12Resource> ai_out[msmai::kMost];
+        const bool ai = smOpt.msm_ai.load() != 0;
+        for (UINT k = 0; ai && k + 1 < n && k < msmai::kMost; ++k)
+        {
+            D3D12_HEAP_PROPERTIES heap = {}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC d = work->GetDesc();
+            lfCore.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr, IID_PPV_ARGS(ai_out[k].put()));
+        }
         com_ptr<ID3D12RootSignature> conv_root;
         com_ptr<ID3D12PipelineState> conv_pso;
         com_ptr<ID3D12DescriptorHeap> conv_heap;
@@ -510,7 +520,38 @@ namespace supervideo
             // The pair before it: its frames in between, then this real frame.
             const LONGLONG span = have_before ? time - before_time : 0;
             if (span > 0) last_length = span;
-            if (have_before && n > 1 && span > 0)
+            bool ai_made = false;
+            if (have_before && n > 1 && span > 0 && ai && !msmai::Failed() && ai_out[0])
+            {
+                open();
+                ID3D12Resource *outs[msmai::kMost] = {};
+                for (UINT k = 0; k + 1 < n && k < msmai::kMost; ++k) outs[k] = ai_out[k].get();
+                ID3D12GraphicsCommandList *l = list.get();
+                ai_made = msmai::Frames(l, in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, outs,
+                                        D3D12_RESOURCE_STATE_COPY_SOURCE, n - 1, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                        [&] {
+                                            if (FAILED(list->Close())) return false;
+                                            ID3D12CommandList *lists[] = { list.get() };
+                                            queue->ExecuteCommandLists(1, lists);
+                                            queue->Signal(fence12.get(), ++fv);
+                                            return true;
+                                        },
+                                        [&] { open(); return true; });
+                // Each in turn: into the generator's picture, then to the encoder (the first in the list open now).
+                for (UINT k = 1; ai_made && k < n && !failed; ++k)
+                {
+                    if (k > 1) open();
+                    D3D12_RESOURCE_BARRIER to = Barrier(work.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                    list->ResourceBarrier(1, &to);
+                    list->CopyResource(work.get(), ai_out[k - 1].get());
+                    D3D12_RESOURCE_BARRIER back = Barrier(work.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    list->ResourceBarrier(1, &back);
+                    if (!emit(before_time + span * LONGLONG(k) / LONGLONG(n), span / LONGLONG(n))) failed = true;
+                }
+                // (Not made - the network refused: the list stays open and SMFG 1.1 makes this pair's frames.)
+                if (!ai_made) { list->Close(); }
+            }
+            if (have_before && n > 1 && span > 0 && !ai_made)
             {
                 open();
                 MsmPair(list.get(), in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, ask);

@@ -20,6 +20,8 @@ type DisplayOptions =
       QueueTarget: int       // 0, 1, 2
       FrameLimit: int        // frames a second shown, 0 off
       GameFps: int           // the game's frame rate as the person gives it (20..500); 0 the engine reads it from the frames
+      Adaptive: bool         // round 54, Mode "Adaptive" (Lossless Scaling's): the frames shown at an even beat of AdaptiveFps; off: "Fixed", the multiplier (Mode)
+      AdaptiveFps: int       // Adaptive's target, frames a second (30..1000); 0 the screen's refresh
       // Round 43, as Lossless Scaling has them: the picture stays while another screen's window is in front; pixels left
       // out of the captured window on each side; and the pointer (kept inside, its speed, hidden, scaled).
       MultiDisplay: bool
@@ -41,6 +43,7 @@ type DisplayOptions =
       MotionSource: int      // 0 DLSS MFG's own, 1 NVIDIA Optical Flow, 2 GPU estimate
       XessMotionSource: int  // XeSS MFG: 0 it finds the motion itself, 1 the engine's GPU estimate, 2 NVIDIA Optical Flow; kept apart from DLSS MFG's choice
       MsmSearch: int         // MSM FG: 0 its search in full, 1 the lighter one; kept apart too
+      MsmAi: bool            // round 52: SMFG AI - its frames made by the neural network on the card's AI units (off unless asked for)
       AdaptiveLearning: bool // Adaptive Motion Learning: what the hand does to the picture is learnt for each game, and the generator told
       DlssPreset: int        // DLSS MFG's preset: 0 the driver's own, 1 Performance (C), 2 Quality (B), 3 Balanced (A); Quality unless picked
       AdaptiveFlow: bool     // Adaptive Flow Scale (needs Adaptive Motion Learning): the size frames in between are made at follows how fast the game's picture moves
@@ -100,9 +103,9 @@ module Preferences =
     let defaultOptions =
         { FrameGeneration = true; Generator = 0; Mode = 2; Flow = 35; Upscaler = 0; Sharpness = 50; OverSharpness = 0
           Schema = schema; CaptureApi = 0; WindowMode = 0; Countdown = 1
-          QueueTarget = 1; FrameLimit = 0; GameFps = 0; MultiDisplay = false; CropLeft = 0; CropTop = 0; CropRight = 0; CropBottom = 0
+          QueueTarget = 1; FrameLimit = 0; GameFps = 0; Adaptive = false; AdaptiveFps = 0; MultiDisplay = false; CropLeft = 0; CropTop = 0; CropRight = 0; CropBottom = 0
           CursorClip = false; CursorSpeed = false; CursorHide = false; CursorScale = false; LimitToScreen = false; Vrr = false; SyncMode = 1; LowLatency = true; Hdr = false
-          GpuPriority = 0; Gpu = ""; MotionSource = 0; XessMotionSource = 0; MsmSearch = 1; AdaptiveLearning = false; AdaptiveFlow = true; DlssPreset = 2
+          GpuPriority = 0; Gpu = ""; MotionSource = 0; XessMotionSource = 0; MsmSearch = 1; MsmAi = false; AdaptiveLearning = false; AdaptiveFlow = true; DlssPreset = 2
           Spout = false; StillPixels = true; MotionGuard = false; FpsCounter = false; GameType = 0 }
 
     let defaultProfile = { Id = "default"; Name = "Default"; Options = defaultOptions }
@@ -166,6 +169,8 @@ module Preferences =
                     { defaultOptions with
                         FrameGeneration = options.FrameGeneration; Mode = options.Mode
                         Upscaler = options.Upscaler; Sharpness = options.Sharpness }
+            // (A development build kept "Adaptive" as a sixth multiplier, Mode 5: it is the mode of its own now.)
+            let options = if options.Mode >= 5 then { options with Mode = 4; Adaptive = true } else options
             { options with Mode = Math.Clamp(options.Mode, 0, 4)
                            Generator = Math.Clamp(options.Generator, 0, generators - 1)
                            Flow = Math.Clamp(options.Flow, 25, 100)
@@ -179,6 +184,7 @@ module Preferences =
                            QueueTarget = Math.Clamp(options.QueueTarget, 0, 2)
                            FrameLimit = normalizeFrameLimit options.FrameLimit
                            GameFps = (if options.GameFps >= 20 && options.GameFps <= 500 then options.GameFps else 0)
+                           AdaptiveFps = (if options.AdaptiveFps >= 30 && options.AdaptiveFps <= 1000 then options.AdaptiveFps else 0)
                            CropLeft = Math.Clamp(options.CropLeft, 0, cropMax)
                            CropTop = Math.Clamp(options.CropTop, 0, cropMax)
                            CropRight = Math.Clamp(options.CropRight, 0, cropMax)

@@ -159,7 +159,10 @@ type MotionEngine() =
         [ "generator", string options.Generator
           "gpu", string card
           "mfg", flag options.FrameGeneration
-          "multiplier", string (options.Mode + 2)
+          // (Round 54, Mode "Adaptive": the frames shown at an even beat, as many as the target asks; the most between
+          // two real frames is x6's.)
+          "multiplier", string (if options.Adaptive then 6 else options.Mode + 2)
+          "adaptive", (if not options.Adaptive then "0" elif options.AdaptiveFps >= 30 then string options.AdaptiveFps else "1")
           "flow", string (max 25 options.Flow)
           "game", string options.GameType
           "queue", string options.QueueTarget
@@ -184,6 +187,8 @@ type MotionEngine() =
           "vrr", flag options.Vrr
           "sync", string options.SyncMode
           "low_latency", flag options.LowLatency
+          // (SMFG AI, round 52: too heavy as it is - its switch is not shown, and it is never asked for.)
+          "msm_ai", "0"
           "hdr", flag options.Hdr
           "gpu_class", (if options.GpuPriority = 0 then "1" else "0")
           "counter", flag options.FpsCounter
@@ -475,3 +480,20 @@ type MotionEngine() =
                     running.StandardInput.Flush()
                     if not (running.WaitForExit 3000) then running.Kill()
                 with _ -> ()
+
+// Round 55: the main screen's refresh rate, what Adaptive aims at while no target is set.
+module ScreenRate =
+    [<System.Runtime.InteropServices.DllImport("user32.dll")>]
+    extern nativeint GetDC(nativeint window)
+    [<System.Runtime.InteropServices.DllImport("user32.dll")>]
+    extern int ReleaseDC(nativeint window, nativeint dc)
+    [<System.Runtime.InteropServices.DllImport("gdi32.dll")>]
+    extern int GetDeviceCaps(nativeint dc, int index)
+
+    let primary () =
+        try
+            let dc = GetDC 0n
+            let rate = GetDeviceCaps(dc, 116)       // VREFRESH
+            ReleaseDC(0n, dc) |> ignore
+            if rate >= 30 && rate <= 1000 then rate else 60
+        with _ -> 60

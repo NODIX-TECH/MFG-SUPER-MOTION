@@ -85,6 +85,75 @@ static void GuardHalf(const BYTE *from, UINT w, UINT h, std::vector<BYTE> &to)
     }
 }
 
+// Round 53: where the picture as a whole went, looked for far (half its width across, a quarter of its height
+// down). The search above reaches 6.5% of the width; a fast camera turn goes further - in a user's GTA V footage
+// a tree went 300 pixels of 1920 from one frame to the next at 60 FPS, and SMFG, finding no place for it, left
+// it where it was with a smeared trace. Told where the picture went, SMFG looks there too (MsmAsk::expected - a
+// place among the others it tries: a wrong word changes nothing): on that footage it put the tree where it
+// belongs. Done on the small luma at an eighth (40 x 22), then a quarter and a half around the best; told only
+// when the best clearly beats standing still and the picture went further than SMFG's own search reaches.
+static struct { bool known = false; float x = 0.0f, y = 0.0f; } g_wide;   // luma pixels, frame before -> now
+
+static void GuardWide(const BYTE *now, const BYTE *before, int w, int h)
+{
+    g_wide.known = false;
+    struct Level { std::vector<int> a, b; int w = 0, h = 0, k = 1; };
+    auto shrink = [&](int k, Level &l) {
+        l.k = k; l.w = w / k; l.h = h / k;
+        l.a.assign(static_cast<size_t>(l.w) * l.h, 0); l.b.assign(l.a.size(), 0);
+        for (int y = 0; y < l.h * k; ++y)
+            for (int x = 0; x < l.w * k; ++x)
+            {
+                const size_t to = static_cast<size_t>(y / k) * l.w + x / k;
+                l.a[to] += now[static_cast<size_t>(y) * w + x];
+                l.b[to] += before[static_cast<size_t>(y) * w + x];
+            }
+    };
+    // The mean difference where they overlap, the picture moved by (dx, dy); none: a third or less overlaps.
+    auto cost = [](const Level &l, int dx, int dy) {
+        const int x0 = std::max(0, dx), x1 = std::min(l.w, l.w + dx), y0 = std::max(0, dy), y1 = std::min(l.h, l.h + dy);
+        if ((x1 - x0) * (y1 - y0) * 3 <= l.w * l.h) return 1e30;
+        long long sum = 0;
+        for (int y = y0; y < y1; ++y)
+        {
+            const int *a = l.a.data() + static_cast<size_t>(y) * l.w, *b = l.b.data() + static_cast<size_t>(y - dy) * l.w - dx;
+            for (int x = x0; x < x1; ++x) sum += std::abs(a[x] - b[x]);
+        }
+        return double(sum) / (double(x1 - x0) * (y1 - y0) * l.k * l.k);
+    };
+    auto search = [&](const Level &l, int cx, int cy, int rx, int ry, int &bx, int &by) {
+        double least = 1e30;
+        for (int dy = cy - ry; dy <= cy + ry; ++dy)
+            for (int dx = cx - rx; dx <= cx + rx; ++dx)
+            {
+                const double c = cost(l, dx, dy);
+                if (c < least) { least = c; bx = dx; by = dy; }
+            }
+        return least;
+    };
+    Level l8, l4, l2;
+    shrink(8, l8); shrink(4, l4); shrink(2, l2);
+    if (l8.w < 16 || l8.h < 8) return;
+    int bx = 0, by = 0;
+    search(l8, 0, 0, l8.w / 2, l8.h / 4, bx, by);
+    int x4 = bx * 2, y4 = by * 2;
+    search(l4, bx * 2, by * 2, 2, 2, x4, y4);
+    int x2 = x4 * 2, y2 = y4 * 2;
+    const double best = search(l2, x4 * 2, y4 * 2, 2, 2, x2, y2);
+    const double still = cost(l2, 0, 0);
+    const float x = float(x2 * 2), y = float(y2 * 2);
+    // (Clearly better than standing still, and further than SMFG reaches by itself: 4% of the width.)
+    if (best < 0.7 * still && std::sqrt(x * x + y * y) > 0.04f * w) { g_wide.known = true; g_wide.x = x; g_wide.y = y; }
+}
+
+// The wide search's word for the pair at hand, a share of the picture's width (as LearnExpect says it).
+static bool GuardWideShift(float &across, float &down)
+{
+    if (!g_wide.known || lfLuma.w == 0) return false;
+    across = g_wide.x / float(lfLuma.w); down = g_wide.y / float(lfLuma.w);
+    return true;
+}
+
 // Did the picture move, since the real frame before, further than the
 // generator follows? Uses the luma the capture just wrote; called once for
 // every new real frame. `restart`: the frame before is not this scene's.
@@ -337,6 +406,8 @@ static bool GuardTooFast(bool restart)
             g.told = tick; g.pairs = g.passed = 0; g.sum_share = 0.0; g.settled = 0;
         }
     }
+    if (comparable) GuardWide(lfLuma.view, g.last.data(), static_cast<int>(w), static_cast<int>(h));
+    else g_wide.known = false;
     g.last.assign(lfLuma.view, lfLuma.view + n);
     g.last_half.swap(g.now_half);
     g.w = w; g.h = h;

@@ -166,3 +166,4 @@ static double ShownRefresh();
 static int PresentCap();
 // What the app is told (sm_control.inl).
 static void Status(const char *format, ...);
+static bool GuardWideShift(float &across, float &down);     // sm_guard.inl (round 53)

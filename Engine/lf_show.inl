@@ -237,6 +237,8 @@ static bool ShowStart(UINT width, UINT height, uint32_t flags)
     SetWindowPos(lfShow.hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
+    // Round 51: the graphics driver told the output window is the one in front (sm_front.inl - VRR).
+    front::Hook(lfShow.hwnd);
     Trace("[screen] output window %ux%u up (flip discard, clicks pass through%s)",
         lfShow.bw, lfShow.bh, lfShow.capturable ? ", visible to capture" : ", hidden from capture");
     if (lfShow.upscaling)
@@ -298,6 +300,7 @@ static bool ShowStart(UINT width, UINT height, uint32_t flags)
 // Close them.
 static void ShowStop()
 {
+    front::Release();
     CloseFgResources();
     if (lfShow.quick_waitable) { CloseHandle(lfShow.quick_waitable); lfShow.quick_waitable = nullptr; }
     if (lfShow.chain != nullptr) { lfShow.chain->Release(); lfShow.chain = nullptr; }

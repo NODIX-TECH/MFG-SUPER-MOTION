@@ -198,10 +198,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         if not lists.IsEmpty then post (fun () -> if not disposed then notify [ "GeneratorIndex"; "GpuIndex" ])
     let notifyOptions () =
         notifyLists ()
-        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "OverSharpness"; "OverSharpnessLabel"
+        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "OverSharpness"; "OverSharpnessLabel"
                  "CaptureApiIndex"; "WindowModeIndex"; "CountdownIndex"; "QueueTargetIndex"
-                 "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
-                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "LearningStatus"
+                 "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "GameFpsText"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
+                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "MsmAiEnabled"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "LearningStatus"
                  "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "FpsCounterEnabled"; "StatusNote"; "HasStatusNote" ]
     let notifyEngine () = notify [ "IsMotionActive"; "IsMotionWaiting"; "IsMotionRunning"; "MotionButtonText"; "StatusText"; "HasStatus"; "StatusNote"; "HasStatusNote"; "LearningStatus" ]
     // What Adaptive Motion Learning keeps, game by game (Settings): read when the page is opened, and again when
@@ -497,6 +497,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.Languages = Languages.names
     member _.Themes = themes
     member _.Modes = [| "×2"; "×3"; "×4"; "×5"; "×6" |]
+    // Round 54: the mode as Lossless Scaling has it - Fixed (the multiplier) or Adaptive (a target).
+    member _.FrameModes = [| "Fixed"; "Adaptive" |]
     member _.Upscalers = upscalers
     member _.CaptureApis = [| "DXGI"; "WGC" |]
     member _.WindowModes = windowModes
@@ -596,6 +598,21 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.ModeIndex
         with get () = selected.Options.Mode
         and set value = if value >= 0 then updateOptions (fun o -> { o with Mode = value })
+    // Round 54, Adaptive MFG: the mode of its own; its target typed (30 to 1000), empty the screen's refresh.
+    member _.FrameModeIndex
+        with get () = if selected.Options.Adaptive then 1 else 0
+        and set value = if value >= 0 then updateOptions (fun o -> { o with Adaptive = (value = 1) })
+    member _.IsAdaptive = selected.Options.Adaptive
+    member _.IsFixed = not selected.Options.Adaptive
+    // (Shown as a number with arrows, as Lossless Scaling's: the screen's refresh while none is set; set back to
+    // the screen's own, it follows the screen again.)
+    member _.AdaptiveTarget
+        with get () = Nullable(decimal (if selected.Options.AdaptiveFps = 0 then ScreenRate.primary () else selected.Options.AdaptiveFps))
+        and set (value: Nullable<decimal>) =
+            // (A number still being typed - 1, 13 of 138 - is let be; leaving the box shows what is kept.)
+            if value.HasValue && value.Value >= 30m && value.Value <= 1000m then
+                let n = int (Math.Round value.Value)
+                updateOptions (fun o -> { o with AdaptiveFps = (if n = ScreenRate.primary () then 0 else n) })
     // The size frames in between are made at, for both generators: the kind of
     // game's own value, locked, or the profile's own for "custom".
     member _.Flow
@@ -665,6 +682,17 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.MultiDisplayEnabled
         with get () = selected.Options.MultiDisplay
         and set value = updateOptions (fun o -> { o with MultiDisplay = value })
+    // Round 51 (GitHub #16): the game's frame rate typed, any number from 20 to 500; empty is Auto. A number outside
+    // that is not taken (while it is being typed: "1" on the way to "144").
+    member _.GameFpsText
+        with get () = if selected.Options.GameFps = 0 then "" else string selected.Options.GameFps
+        and set (value: string) =
+            let text = if isNull value then "" else value.Trim()
+            if text = "" then updateOptions (fun o -> { o with GameFps = 0 })
+            else
+                match Int32.TryParse text with
+                | true, n when n >= 20 && n <= 500 -> updateOptions (fun o -> { o with GameFps = n })
+                | _ -> ()
     member _.CropLeftText with get () = string selected.Options.CropLeft and set (value: string) = cropSet value (fun o n -> { o with CropLeft = n })
     member _.CropTopText with get () = string selected.Options.CropTop and set (value: string) = cropSet value (fun o n -> { o with CropTop = n })
     member _.CropRightText with get () = string selected.Options.CropRight and set (value: string) = cropSet value (fun o n -> { o with CropRight = n })
@@ -749,6 +777,9 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.LearnedGames = learned
     member _.HasLearnedGames = learned.Count > 0
     member _.NoLearnedGames = learned.Count = 0
+    member _.MsmAiEnabled
+        with get () = selected.Options.MsmAi
+        and set value = updateOptions (fun o -> { o with MsmAi = value })
     member _.StillPixelsEnabled
         with get () = selected.Options.StillPixels
         and set value = updateOptions (fun o -> { o with StillPixels = value })
@@ -771,7 +802,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             if engineStatus.MfgUnavailable then text.StatusUnavailable.Replace("DLSS MFG", this.GeneratorName)
             elif engineStatus.BaseFps >= 0 && engineStatus.OutputFps >= 0 && engineStatus.Width > 0 then
                 let rate =
-                    if engineStatus.Multiplier > 1 then sprintf "%d/%d FPS · ×%d" engineStatus.BaseFps engineStatus.OutputFps engineStatus.Multiplier
+                    if engineStatus.Multiplier > 1 && selected.Options.Adaptive then sprintf "%d/%d FPS · Adaptive" engineStatus.BaseFps engineStatus.OutputFps
+                    elif engineStatus.Multiplier > 1 then sprintf "%d/%d FPS · ×%d" engineStatus.BaseFps engineStatus.OutputFps engineStatus.Multiplier
                     else sprintf "%d FPS" engineStatus.OutputFps
                 sprintf "%s · %d×%d · %s" rate engineStatus.Width engineStatus.Height (engineStatus.Api.ToUpperInvariant())
             elif engineStatus.Width > 0 then

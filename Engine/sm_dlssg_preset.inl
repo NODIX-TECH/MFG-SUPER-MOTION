@@ -51,6 +51,23 @@ namespace dlssgpreset
         {
             void *profile = nullptr;
             const bool ours = find_profile(session, kProfileName, &profile) == 0 && profile;
+            // Round 51 (a user's word, GitHub #11, seen with the driver's own Flip Indicator): the driver takes the program
+            // the profile is for as "nvngx.dll.exe" - the engine's file has no .exe of its own - so a profile that names
+            // "nvngx.dll" alone never applied. Both names are in it; true when one was added here.
+            auto also_exe = [&](void *into) -> bool {
+                wchar_t name[MAX_PATH + 8];
+                swprintf_s(name, L"%ls.exe", program);
+                if (_wcsicmp(program + wcslen(program) - (wcslen(program) >= 4 ? 4 : 0), L".exe") == 0) return false;
+                void *where = nullptr;
+                static App found, a;
+                Version(found);
+                if (find_app(session, name, &where, &found) == 0 && where) return false;
+                Version(a);
+                wcsncpy_s(reinterpret_cast<wchar_t *>(a.bytes + 8), 2048, name, _TRUNCATE);
+                const bool added = create_app(session, into, &a) == 0;
+                if (added) Trace("[dlssg] the driver's profile of the engine names %ls too (the name the driver goes by)", name);
+                return added;
+            };
             auto value_of = [&](unsigned id) -> long long {
                 static Setting s;
                 Version(s);
@@ -66,8 +83,12 @@ namespace dlssgpreset
                     Trace("[dlssg] preset: the driver's own (the engine's profile with an override taken away)");
             }
             else if (value_of(kOverride) == 1 && value_of(kPreset) == preset)
+            {
                 Trace("[dlssg] preset %c (%s) - already in the driver's profile of the engine", 'A' + preset - 1,
                       preset == 3 ? "Performance" : preset == 2 ? "Quality" : "Balanced");
+                // (A profile made by an engine before round 51 has the program's name alone: the second one is added.)
+                if (also_exe(profile)) save(session);
+            }
             else
             {
                 if (!ours)
@@ -85,6 +106,7 @@ namespace dlssgpreset
                     if (find_app(session, program, &elsewhere, &found) == 0 && elsewhere) profile = nullptr;
                     else if (create_profile(session, &p, &profile) != 0 || !profile || create_app(session, profile, &a) != 0) profile = nullptr;
                 }
+                if (profile) also_exe(profile);
                 bool done = false;
                 if (profile)
                 {

@@ -15,6 +15,7 @@ struct Options
     std::atomic<int> queue{1};         // Queue target: 0 least delay, 1 balanced, 2 smoothest
     std::atomic<int> still{1};         // what does not move stays put (lf_fg_still.inl)
     std::atomic<int> guard{0};         // 1: no frames in between while the picture moves too fast for them (sm_guard.inl)
+    std::atomic<int> msm_ai{0};        // round 52: SMFG's frames made by the neural network on the card's AI units (msm_ai.h)
     std::atomic<int> msm_search{0};    // MSM FG's search for the motion: 0 in full, 1 the lighter one (msm_fg.h, MsmAsk::fast)
     std::atomic<int> aml{0};           // Adaptive Motion Learning: what the hand does to the picture is learnt, and the generator told (sm_learn.inl)
     std::atomic<int> frame_log{0};     // round 45: frames.log - every frame shown, its gap, the engine's lines among them (the app's development build only)
@@ -22,6 +23,7 @@ struct Options
     std::atomic<int> aml_flow{1};      // Adaptive Flow Scale: with aml, the size frames in between are made at follows how fast the game's picture moves (sm_learn.inl)
     std::atomic<int> dlssg_preset{0};  // round 42, DLSS MFG: 0 the driver's own, 1 preset A (Balanced), 2 B (Quality), 3 C (Performance) - sm_dlssg_preset.inl
     std::atomic<int> frame_limit{0};   // most frames a second shown, 0 none
+    std::atomic<int> adaptive{0};      // round 53, Adaptive MFG: the frames a second shown, evenly, whatever the game's (0 off, 1 the screen's)
     std::atomic<int> game_fps{0};      // round 42: the game's frame rate as the person gives it (20..500); 0 the engine reads it from the frames
     // Round 43, as Lossless Scaling has them (sm_cursor.inl, lf_show.inl, lf_desktop.inl).
     std::atomic<int> multi_display{0}; // 1: the picture stays while another window, on another screen, is in front
@@ -105,8 +107,13 @@ static std::atomic<int> g_learn_flow{0};
 // its frame), frames are not let go unseen by a pace learnt, the frames in between a pair are counted from it, and
 // the moments of the real frames keep its beat. (A user's report: "capture and output fps fluctuate with in-game
 // actions ... add a manual override for capture fps".)
+// Round 56: unless the game's own frames say otherwise (sm_loop.inl, GivenCheck) - a user's log: Game FPS 30 given,
+// the game drawing 42 to 55; the moments learnt from 30 dropped pairs by the hundred (the picture stepping up and
+// down) and Adaptive's 176 came out as 240, its room counted per 33 ms pair while pairs came every 24 ms.
+static std::atomic<bool> g_given_off{false};
 static double GivenFrameTime()
 {
+    if (g_given_off.load()) return 0.0;
     const int fps = smOpt.game_fps.load();
     return fps >= 20 && fps <= 500 ? 1.0 / fps : 0.0;
 }

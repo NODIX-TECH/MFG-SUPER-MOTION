@@ -139,6 +139,37 @@ static void SessionTell(Session &s)
 }
 
 
+// Round 56: is "Game FPS" as given what the game draws? Its own frames (a picture that changed) are timed: the
+// middle half of the last 32 times between them, averaged (the stamps lie on the screen's refresh grid, 20 and 25 ms
+// for a game at 42 on 200 Hz). Two seconds more than 15% off the given rate: the engine goes by the frames as if none
+// were given (GivenFrameTime 0) and says so; two seconds back within it: by the given one again.
+static void GivenCheck(double stamp)
+{
+    static double last = 0.0, spans[32] = {}, since = 0.0;
+    static unsigned filled = 0, next = 0;
+    const int fps = smOpt.game_fps.load();
+    if (fps < 20 || fps > 500) { g_given_off = false; last = 0.0; filled = next = 0; since = 0.0; return; }
+    const double span = last > 0.0 ? stamp - last : 0.0;
+    last = stamp;
+    if (span <= 0.0 || span > 0.2) return;
+    spans[next] = span; next = (next + 1) % 32; if (filled < 32) ++filled;
+    if (filled < 32) return;
+    double sorted[32];
+    std::copy(spans, spans + 32, sorted);
+    std::sort(sorted, sorted + 32);
+    double sum = 0.0;
+    for (int i = 8; i < 24; ++i) sum += sorted[i];
+    const double drawn = 16.0 / sum;
+    const bool off = drawn > fps * 1.15 || drawn < fps / 1.15;
+    if (off == g_given_off.load()) { since = 0.0; return; }
+    if (since == 0.0) { since = stamp; return; }
+    if (stamp - since < 2.0) return;
+    since = 0.0;
+    g_given_off = off;
+    if (off) Trace("[pace] Game FPS %d given, the game draws %.0f - its own frames' pace is used until they agree again", fps, drawn);
+    else Trace("[pace] the game draws %.0f again, as Game FPS %d says - it is used", drawn, fps);
+}
+
 // One frame. 0: go on; anything else ends the engine with that code.
 static int FrameStep(Session &s)
 {
@@ -223,6 +254,7 @@ static int FrameStep(Session &s)
         got = false;
     }
     if (source_fresh) { PaceTaken(); FgGateFresh(lfCap.stamp); }
+    if (source_fresh && change > 0.0) GivenCheck(lfCap.stamp);
     // Was this frame of the game there before the loop came for it? Then the
     // loop, not the game, sets the pace - and frames of the game go unseen.
     const bool counted = source_fresh && generating && lfCap.stamp > 0.0;
