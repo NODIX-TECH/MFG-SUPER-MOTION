@@ -7,7 +7,6 @@ Support is completely optional — using, sharing, testing, and reporting issues
     <img src="https://img.shields.io/badge/❤️%20SUPPORT%20DEVELOPMENT-Patreon-FF424D?style=for-the-badge" alt="Support Development on Patreon">
   </a>
 </p>
-
 ADAPTIVE MOTION LEARNING
 
 <img width="1847" height="681" alt="image" src="https://github.com/user-attachments/assets/9bc3d5e4-e1fd-4ace-bc13-77a7be953278" />
