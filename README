@@ -1,69 +1,69 @@
-# MFG SUPER MOTION
+## ❤️ Support Development
 
-### Motion beyond the original frame.
+Support is completely optional — using, sharing, testing, and reporting issues already helps the project a lot.
 
-**MFG SUPER MOTION** by **NODIX TECH** is a standalone Multi-Frame Generation application designed to make games and video playback smoother using real-time motion analysis and frame generation.
+<p align="center">
+  <a href="https://www.patreon.com/cw/NODIXTECH/shop">
+    <img src="https://img.shields.io/badge/❤️%20SUPPORT%20DEVELOPMENT-Patreon-FF424D?style=for-the-badge" alt="Support Development on Patreon">
+  </a>
+</p>
 
-Our goal is to provide a simple, accessible experience without complicated configuration.
+ADAPTIVE MOTION LEARNING
 
-🌐 **Website:** https://mfgsm.com/  
-📦 **GitHub:** https://github.com/NODIX-TECH/MFG-SUPER-MOTION
+<img width="1847" height="681" alt="image" src="https://github.com/user-attachments/assets/9bc3d5e4-e1fd-4ace-bc13-77a7be953278" />
 
-## Features
+<img width="836" height="439" alt="image" src="https://github.com/user-attachments/assets/8a78bdc7-3028-4029-82b5-9795cb1dfb8e" />
 
-- **Multi-Frame Generation:** Generate additional frames for smoother motion.
-- **Adaptive Motion Learning:** Analyze motion to improve frame generation.
-- **Real-Time Processing:** Process frames directly on the GPU.
-- **Motion Analysis:** Track movement to support frame interpolation.
-- **Multiple Generation Modes:** Support different frame-generation configurations.
-- **Super Video:** Make video playback smoother.
-- **Simple Interface:** Easy activation and accessible settings.
-
-## Project Goals
-
-- Improve motion smoothness while keeping latency low.
-- Optimize GPU performance and frame pacing.
-- Improve image quality and reduce visual artifacts.
-- Expand hardware compatibility.
-- Continue improving motion analysis and frame generation.
+<img width="726" height="406" alt="image" src="https://github.com/user-attachments/assets/21ca39a2-0753-462c-bc09-2aa1c56c94ac" />
 
 ## ❤️ Support Development
 
-MFG SUPER MOTION is free to use. We do not intend to sell the application.
+Support is completely optional — using, sharing, testing, and reporting issues already helps the project a lot.
 
-Support is completely optional. Using the application, sharing it, testing compatibility, and reporting issues all help the project.
-
-## Bug Reports and Feedback
-
-If you encounter a problem, please report it through the GitHub Issues page:
-
-https://github.com/NODIX-TECH/MFG-SUPER-MOTION/issues
-
-Include relevant details about your GPU, game or application, settings, and logs when available.
+<p align="center">
+  <a href="https://www.patreon.com/cw/NODIXTECH/shop">
+    <img src="https://img.shields.io/badge/❤️%20SUPPORT%20DEVELOPMENT-Patreon-FF424D?style=for-the-badge" alt="Support Development on Patreon">
+  </a>
+</p>
 
 ## License & Copyright
 
-Copyright © 2026 NODIX-TECH.
+Copyright © 2026 **NODIX-TECH**
 
-MFG SUPER MOTION is source-available software.
+MFG SUPER MOTION is **source-available software**.
 
-Original portions created and owned by NODIX-TECH are licensed under the **PolyForm Strict License 1.0.0**.
+Original portions of MFG SUPER MOTION created and owned by NODIX-TECH are licensed under the **PolyForm Strict License 1.0.0**.
 
-See `LICENSE` for the complete terms.
+Under this license, the original NODIX-TECH software may be used for permitted non-commercial purposes, subject to the complete license terms.
+
+The license does not grant permission to redistribute the software or to make modifications, derivative works, rebranded versions, or repackaged versions of the original NODIX-TECH software.
+
+See:
+
+**[LICENSE](LICENSE)**
+
+for the complete PolyForm Strict License 1.0.0 terms.
 
 ### Third-Party Components
 
-Third-party components and technologies, including those from NVIDIA and Intel, remain subject to their respective owners' licenses and distribution terms.
+The PolyForm Strict License applies only to original portions of MFG SUPER MOTION owned and licensed by NODIX-TECH.
 
-See `THIRD-PARTY-NOTICES.txt` for third-party notices and licensing information.
+It does **not** replace, modify, override, or relicense third-party software.
+
+MFG SUPER MOTION uses, interacts with, or references technologies and components from NVIDIA, Intel, and other third-party developers and organizations.
+
+Those components remain the property of their respective copyright holders and remain subject to their respective licenses and distribution terms.
+
+See:
+
+**[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)**
+
+for third-party attribution and licensing information.
 
 ### Independent Project Notice
 
-MFG SUPER MOTION is an independent project. It is not affiliated with, sponsored by, or endorsed by NVIDIA Corporation, Intel Corporation, or other referenced vendors.
+MFG SUPER MOTION is an independent project.
 
-All third-party trademarks and product names belong to their respective owners.
+It is not affiliated with, sponsored by, endorsed by, or an official product of NVIDIA Corporation, Intel Corporation, or other referenced hardware or software vendors.
 
----
-
-**MFG SUPER MOTION — Motion beyond the original frame.**  
-Made by NODIX TECH.
+All third-party product names, technologies, trademarks, and company names remain the property of their respective owners.
