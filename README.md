@@ -15,15 +15,6 @@ ADAPTIVE MOTION LEARNING
 
 <img width="726" height="406" alt="image" src="https://github.com/user-attachments/assets/21ca39a2-0753-462c-bc09-2aa1c56c94ac" />
 
-## ❤️ Support Development
-
-Support is completely optional — using, sharing, testing, and reporting issues already helps the project a lot.
-
-<p align="center">
-  <a href="https://www.patreon.com/cw/NODIXTECH/shop">
-    <img src="https://img.shields.io/badge/❤️%20SUPPORT%20DEVELOPMENT-Patreon-FF424D?style=for-the-badge" alt="Support Development on Patreon">
-  </a>
-</p>
 
 ## License & Copyright
 
