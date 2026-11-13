@@ -67,6 +67,40 @@
       <Style Selector="^:focus-visible /template/ Rectangle#SwitchFocus"><Setter Property="IsVisible" Value="True" /></Style>
       <Style Selector="^:disabled"><Setter Property="Opacity" Value="0.45" /></Style>
     </ControlTheme>
+  <!-- 1.1.0 testers' round: the switch part of a chip that holds a "?" and a gear (Border.chipbox draws the pill). -->
+  <ControlTheme x:Key="ChipInner" TargetType="ToggleButton">
+    <Setter Property="MinHeight" Value="36" /><Setter Property="Padding" Value="14,6,8,6" /><Setter Property="FontSize" Value="13" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Background" Value="Transparent" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="InnerBack" Background="Transparent" CornerRadius="18" Padding="{TemplateBinding Padding}">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Ellipse Name="ChipDot" Width="8" Height="8" Fill="{DynamicResource SwitchBorderBrush}" VerticalAlignment="Center" />
+            <ContentPresenter Content="{TemplateBinding Content}" VerticalAlignment="Center" Foreground="{DynamicResource TextBrush}" />
+          </StackPanel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:checked /template/ Ellipse#ChipDot"><Setter Property="Fill" Value="{DynamicResource AccentBrush}" /></Style>
+    <Style Selector="^:focus-visible /template/ Border#InnerBack"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /><Setter Property="BorderThickness" Value="1" /></Style>
+  </ControlTheme>
+  <ControlTheme x:Key="Chip" TargetType="ToggleButton">
+    <Setter Property="MinHeight" Value="38" /><Setter Property="Padding" Value="16,6" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="FontSize" Value="13" /><Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Name="ChipBack" Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="19" Padding="{TemplateBinding Padding}">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Ellipse Name="ChipDot" Width="8" Height="8" Fill="{DynamicResource SwitchBorderBrush}" VerticalAlignment="Center" />
+            <ContentPresenter Name="ChipText" Content="{TemplateBinding Content}" VerticalAlignment="Center" Foreground="{DynamicResource TextBrush}" />
+          </StackPanel>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:pointerover /template/ Border#ChipBack"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
+    <Style Selector="^:checked /template/ Border#ChipBack"><Setter Property="Background" Value="{DynamicResource SelectionBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
+    <Style Selector="^:checked /template/ Ellipse#ChipDot"><Setter Property="Fill" Value="{DynamicResource AccentBrush}" /></Style>
+    <Style Selector="^:focus-visible /template/ Border#ChipBack"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /><Setter Property="BorderThickness" Value="2" /></Style>
+    <Style Selector="^:disabled"><Setter Property="Opacity" Value="0.45" /></Style>
+  </ControlTheme>
   </Styles.Resources>
   <Style Selector="Window">
     <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
@@ -107,6 +141,22 @@
   <Style Selector="NumericUpDown.target /template/ TextBox#PART_TextBox:focus"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
   <Style Selector="NumericUpDown.target:focus-within /template/ ButtonSpinner"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
   <Style Selector="NumericUpDown.target /template/ RepeatButton"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" /><Setter Property="Width" Value="32" /><Setter Property="MinWidth" Value="32" /></Style>
+  <!-- 1.1.0 (last page round), the multiplier's field (and the Adaptive target's): its name and its number on one line, the number a drop-down
+       or, for Custom and Adaptive, typed and stepped with arrows - all inside the field, no box within the box. -->
+  <Style Selector="Border.field-box"><Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="10" /><Setter Property="Padding" Value="14,0,4,0" /><Setter Property="Height" Value="46" /></Style>
+  <Style Selector="TextBlock.field-label"><Setter Property="FontSize" Value="13" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" /><Setter Property="VerticalAlignment" Value="Center" /><Setter Property="Margin" Value="0,0,10,0" /></Style>
+  <Style Selector="ComboBox.inline"><Setter Property="Width" Value="NaN" /><Setter Property="MinWidth" Value="80" /><Setter Property="HorizontalAlignment" Value="Stretch" /><Setter Property="VerticalAlignment" Value="Center" /><Setter Property="Height" Value="40" /><Setter Property="MinHeight" Value="40" /><Setter Property="Padding" Value="4,0,8,0" /><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="FontSize" Value="15" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="VerticalContentAlignment" Value="Center" /></Style>
+  <Style Selector="ComboBox.inline:pointerover /template/ Border#Background"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /></Style>
+  <Style Selector="NumericUpDown.inline"><Setter Property="Width" Value="NaN" /><Setter Property="HorizontalAlignment" Value="Stretch" /><Setter Property="VerticalAlignment" Value="Center" /><Setter Property="Height" Value="40" /><Setter Property="MinHeight" Value="40" /><Setter Property="FontSize" Value="15" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /><Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderThickness" Value="0" /><Setter Property="VerticalContentAlignment" Value="Center" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ ButtonSpinner"><Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderThickness" Value="0" /><Setter Property="CornerRadius" Value="6" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="4,0" /><Setter Property="MinHeight" Value="38" /><Setter Property="VerticalContentAlignment" Value="Center" /><Setter Property="FontSize" Value="15" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox /template/ Border#PART_BorderElement"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox:pointerover /template/ Border#PART_BorderElement"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox:focus /template/ Border#PART_BorderElement"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox:pointerover"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ TextBox#PART_TextBox:focus"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ RepeatButton"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" /><Setter Property="Width" Value="30" /><Setter Property="MinWidth" Value="30" /></Style>
+  <Style Selector="NumericUpDown.inline /template/ RepeatButton:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource HoverBrush}" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
   <Style Selector="NumericUpDown.target /template/ RepeatButton:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource HoverBrush}" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
   <Style Selector="TextBox.crop:pointerover"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
   <Style Selector="TextBox.crop:focus"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
@@ -151,13 +201,63 @@
   <Style Selector="ListBox.profiles ListBoxItem:selected /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource SelectionBrush}" /></Style>
   <Style Selector="ListBox.profiles ListBoxItem Border.profile-marker"><Setter Property="Opacity" Value="0" /></Style>
   <Style Selector="ListBox.profiles ListBoxItem:selected Border.profile-marker"><Setter Property="Opacity" Value="1" /></Style>
-  <Style Selector="Border#Sidebar"><Setter Property="Width" Value="252" /><Setter Property="Padding" Value="16,20,16,14" /><Setter Property="BorderThickness" Value="0,0,1,0" /></Style>
+  <Style Selector="Border#Sidebar"><Setter Property="Width" Value="252" /><Setter Property="Padding" Value="16,20,8,14" /><Setter Property="BorderThickness" Value="0" /></Style>
   <Style Selector="StackPanel#ContentStack"><Setter Property="Margin" Value="48,32" /></Style>
   <Style Selector="Window.compact Border#Sidebar"><Setter Property="Width" Value="164" /><Setter Property="Padding" Value="10,16,10,12" /></Style>
   <Style Selector="Window.compact StackPanel#ContentStack"><Setter Property="Margin" Value="16,14" /></Style>
   <Style Selector="Window.compact TextBlock.heading"><Setter Property="FontSize" Value="20" /></Style>
   <Style Selector="Window.compact TextBlock.row-label"><Setter Property="FontSize" Value="14" /></Style>
   <Style Selector="Window.compact Button.nav"><Setter Property="FontSize" Value="14" /></Style>
-  <Style Selector="Window.rtl Border#Sidebar"><Setter Property="BorderThickness" Value="1,0,0,0" /></Style>
+  <!-- 1.1.0, the main page (the owner's sketch): one choice of a few side by side (the generator, Fixed / Adaptive), the
+       upscalers as tiles, and switches as chips. Colours 60 / 30 / 10: the page's own surfaces, its lines and text, and the
+       accent only on what is picked or on. Plain fills, no shadows or animations - the page costs the PC next to nothing. -->
+  <Style Selector="ListBox.segmented">
+    <Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" />
+    <Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="10" /><Setter Property="Padding" Value="3" />
+    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" /><Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+    <Setter Property="ItemsPanel"><ItemsPanelTemplate><UniformGrid Rows="1" /></ItemsPanelTemplate></Setter>
+  </Style>
+  <Style Selector="ListBox.segmented ListBoxItem">
+    <Setter Property="MinHeight" Value="36" /><Setter Property="Padding" Value="10,6" /><Setter Property="CornerRadius" Value="7" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" /><Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="FontWeight" Value="SemiBold" /><Setter Property="FontSize" Value="14" />
+  </Style>
+  <Style Selector="ListBox.segmented ListBoxItem:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource HoverBrush}" /></Style>
+  <Style Selector="ListBox.segmented ListBoxItem:selected /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource AccentBrush}" /><Setter Property="Foreground" Value="White" /></Style>
+  <Style Selector="ListBox.segmented ListBoxItem:selected TextBlock"><Setter Property="Foreground" Value="White" /></Style>
+  <Style Selector="ListBox.segmented ListBoxItem:selected:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource AccentHoverBrush}" /></Style>
+  <Style Selector="ListBox.segmented:disabled"><Setter Property="Opacity" Value="0.55" /></Style>
+  <Style Selector="ListBox.tiles">
+    <Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="0" />
+    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" /><Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+    <Setter Property="ItemsPanel"><ItemsPanelTemplate><UniformGrid Columns="3" /></ItemsPanelTemplate></Setter>
+  </Style>
+  <Style Selector="ListBox.tiles ListBoxItem">
+    <Setter Property="Margin" Value="3" /><Setter Property="MinHeight" Value="44" /><Setter Property="Padding" Value="6,4" /><Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" /><Setter Property="BorderThickness" Value="1" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" /><Setter Property="VerticalContentAlignment" Value="Center" /><Setter Property="FontSize" Value="13" />
+  </Style>
+  <Style Selector="ListBox.tiles ListBoxItem:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource HoverBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
+  <Style Selector="ListBox.tiles ListBoxItem:selected /template/ ContentPresenter"><Setter Property="Background" Value="{DynamicResource SelectionBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /><Setter Property="BorderThickness" Value="2" /></Style>
+  <Style Selector="ListBox.tiles ListBoxItem:selected TextBlock"><Setter Property="FontWeight" Value="SemiBold" /></Style>
+
+  <!-- 1.1.0 testers' round: a chip that holds its own "?" and gear - the pill is the Border, the switch part the toggle. -->
+  <Style Selector="Border.chipbox"><Setter Property="Background" Value="{DynamicResource InputBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="19" /><Setter Property="MinHeight" Value="38" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="Padding" Value="0,0,6,0" /></Style>
+  <Style Selector="Border.chipbox:pointerover"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
+  <Style Selector="Border.chipbox.on"><Setter Property="Background" Value="{DynamicResource SelectionBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Style>
+  <Style Selector="Border.chipbox:disabled"><Setter Property="Opacity" Value="0.45" /></Style>
+  <Style Selector="Button.chip-icon"><Setter Property="Width" Value="26" /><Setter Property="Height" Value="26" /><Setter Property="MinHeight" Value="26" /><Setter Property="Padding" Value="0" /><Setter Property="CornerRadius" Value="13" /><Setter Property="Margin" Value="2,0,0,0" /><Setter Property="FontSize" Value="12" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="HorizontalContentAlignment" Value="Center" /><Setter Property="VerticalContentAlignment" Value="Center" /><Setter Property="VerticalAlignment" Value="Center" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" /></Style>
+  <Style Selector="Button.chip-icon:pointerover /template/ ContentPresenter#PART_ContentPresenter"><Setter Property="Background" Value="{DynamicResource HoverBrush}" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Style>
+  <Style Selector="Path.chip-gear"><Setter Property="Width" Value="16" /><Setter Property="Height" Value="16" /><Setter Property="Stretch" Value="Uniform" /><Setter Property="Fill" Value="{DynamicResource MutedBrush}" /><Setter Property="FlowDirection" Value="LeftToRight" /></Style>
+  <Style Selector="FlyoutPresenter.settings"><Setter Property="Background" Value="{DynamicResource SurfaceBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="12" /><Setter Property="Padding" Value="18,12" /><Setter Property="MaxWidth" Value="460" /></Style>
+  <Style Selector="Button.chip-icon:pointerover Path.chip-gear"><Setter Property="Fill" Value="{DynamicResource AccentBrush}" /></Style>
+  <!-- 1.1.0: the side bar in the page's own look - on the page's colour, its parts on cards, no line between. -->
+  <Style Selector="Border.side-card"><Setter Property="Background" Value="{DynamicResource SurfaceBrush}" /><Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="12" /><Setter Property="Padding" Value="8" /></Style>
+  <Style Selector="Border#Sidebar"><Setter Property="Background" Value="{DynamicResource WorkspaceBrush}" /></Style>
+  <Style Selector="Window.material Border#Sidebar"><Setter Property="Background" Value="Transparent" /></Style>
+  <Style Selector="Button.nav.active TextBlock"><Setter Property="FontWeight" Value="SemiBold" /></Style>
+  <Style Selector="Button.nav.active Path.nav-icon"><Setter Property="Stroke" Value="{DynamicResource AccentBrush}" /></Style>  <Style Selector="TextBlock.page-title"><Setter Property="FontSize" Value="28" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="VerticalAlignment" Value="Center" /></Style>
+  <Style Selector="TextBlock.card-label"><Setter Property="FontSize" Value="13" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" /><Setter Property="Margin" Value="2,10,0,6" /></Style>
+  <Style Selector="Window.rtl Border#Sidebar"><Setter Property="BorderThickness" Value="0" /></Style>
   <Style Selector="Window.rtl Control.row-control"><Setter Property="HorizontalAlignment" Value="Left" /></Style>
 </Styles>

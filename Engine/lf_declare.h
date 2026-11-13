@@ -22,6 +22,9 @@ static unsigned FgStillCounted();
 static void Luma11Stop();
 static void ReportDeviceLoss(const char *where);
 static UINT64 CmdSubmit();
+// Round 94: the pieces of work sent to the card, by who sends them - 0 the loop's queue, 1 the presenter's, 2 the
+// capture's own device, 3 the Presents (told with the pacing line; each piece takes the card from the game).
+static std::atomic<unsigned> g_pieces[4];
 static bool AwaitMark(ID3D12Fence *f, UINT64 v, DWORD timeout_ms);
 static void CmdCloseSafe();
 static void DropCommands();
@@ -144,6 +147,10 @@ static void CounterStamp(ID3D12GraphicsCommandList *list, ID3D12Resource *back_b
 static void ShowProof(ID3D12GraphicsCommandList *list, ID3D12Resource *back_buffer, bool real);
 static double LatencyNow();
 static void VrrObserve();
+static bool FitActive();                    // lf_vrr.inl (1.1.0)
+static double FitBeat(double asked);
+static double FitSnap(double when);
+static int FakeHz();
 static bool LowLatencyWanted();
 static void LowLatencyWait();
 static void LatencyPresented(double source);

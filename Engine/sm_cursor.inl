@@ -121,10 +121,10 @@ namespace cursorfx
                       lfShow.hwnd != nullptr && lfShow.visible;
         if (active)
         {
-            DWORD game = 0, front = 0;
+            DWORD game = 0;
             GetWindowThreadProcessId(lfCap.window, &game);
-            GetWindowThreadProcessId(GetForegroundWindow(), &front);
-            active = game != 0 && game == front;
+            // (Round 89: FrontIsGame - also a window of another program no one looks at holding the focus.)
+            active = game != 0 && FrontIsGame();
         }
         RECT picture = {};
         if (active && !GetWindowRect(lfShow.hwnd, &picture)) active = false;

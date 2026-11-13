@@ -49,6 +49,13 @@ type App() =
                  | "IsEditorOpen" when model.IsEditorOpen -> window.FocusProfileName()
                  | "IsAdvancedOpen" -> applyAdvanced ()
                  | _ -> ())
+             // App Mods (round 72): the mods that are on, loaded once the window is up (Views\ModHost.fs).
+             let mods = ModManager(window, model)
+             let mutable modsStarted = false
+             window.Opened.Add(fun _ ->
+                 if not modsStarted then
+                     modsStarted <- true
+                     mods.Start())
              window.Closed.Add(fun _ ->
                  (tray :> System.IDisposable).Dispose()
                  (model :> System.IDisposable).Dispose())

@@ -128,9 +128,9 @@ struct FgSlot {
     // its index; -1 the real frame after, -2 the real frame before). 0: the pair is shown as always.
     bool ad_on = false;       // shown by the beat (none of its beats: nothing of it is shown)
     unsigned adaptive = 0;
-    double ad_when[8] = {};
-    float ad_phase[8] = {};
-    signed char ad_what[8] = {};
+    double ad_when[16] = {};
+    float ad_phase[16] = {};
+    signed char ad_what[16] = {};
     // Set by the card when the mark is reached; FgDoneWatch writes done_at then.
     HANDLE done_event = nullptr;
     std::atomic<UINT64> watched{0};
@@ -139,6 +139,10 @@ struct FgSlot {
     // whether any tile of it is at rest.
     winrt::com_ptr<ID3D12Resource> still;
     bool protect = false;
+    // Round 90, SMHUD (sm_hud.h): where the game's HUD is, found by the network for this pair - kept as the real
+    // frame has it in every frame in between; hud_on: the map holds this pair's.
+    winrt::com_ptr<ID3D12Resource> hud;
+    bool hud_on = false;
 };
 static struct FgState {
     HMODULE module = nullptr;
@@ -152,6 +156,7 @@ static struct FgState {
     std::shared_ptr<FgReal> reals[6];     // the pool: four pairs in flight, each with the frame before it, and the next
     std::shared_ptr<FgReal> latest;       // the real frame of the pair before (the loop's thread)
     winrt::com_ptr<ID3D12Resource> output[5];
+    unsigned room = 0;          // the frames in between a pair has places for (FgRoom, when they were made)
     winrt::com_ptr<ID3D12Resource> disable, disable_readback;
     UINT w = 0, height = 0, mw = 0, mh = 0;
     UINT full_w = 0, full_h = 0;
@@ -172,6 +177,7 @@ static struct FgState {
 #include "sm_rebuild.inl"
 #include "msm_fg.h"
 #include "msm_ai.h"
+#include "sm_hud.h"
 
 // Never free textures still referenced by submitted GPU work on a timeout.
 static bool FgAwait(ID3D12Fence *fence, UINT64 value, DWORD timeout)
@@ -204,6 +210,12 @@ static bool FgAwaitPatient(ID3D12Fence *fence, UINT64 value)
 }
 
 static unsigned g_fg_count = 1, g_fg_requested_count = 0, g_fg_runtime_max = 5;
+// Round 95 (round 58's, lost with the return to 1.0.3 in round 83): places for a pair's frames in between - the
+// multiplier's, and for SMFG at a fixed multiplier's own even beat (fixed_beat) two more, five at most: a pair a
+// little longer than the game's average, or one whose beats fall clear of both real frames, has a beat more than the
+// multiplier's count, and SMFG makes a frame for each. (DLSS MFG rebuilt: each beat goes by the frame of its own
+// nearest it and needs no more than its multiplier's.)
+static unsigned FgRoom() { return EvenOn() && MsmSelected() ? std::min(5u, g_fg_count + 2u) : g_fg_count; }
 
 // Round 53, Adaptive MFG (users' request: Lossless Scaling's and NVIDIA's own). The frames are shown at the output's
 // own even beat - a target's frames a second (the screen's refresh unless given), whatever the game draws: a game at
@@ -215,10 +227,37 @@ static unsigned g_fg_count = 1, g_fg_requested_count = 0, g_fg_runtime_max = 5;
 // DLSS MFG and XeSS MFG make their frames only at even shares of a pair: with them the target is a limit, filled
 // as before (FgPresent: `capped`).
 static constexpr float kAdaptiveNear = 0.08f;
-struct AdaptivePlan { unsigned n = 0, made = 0; double when[8] = {}; float phase[8] = {}; signed char what[8] = {}; };
+static constexpr unsigned kAdaptiveMost = 16;   // beats a pair at most (a pair far longer than the game's average has many)
+struct AdaptivePlan { unsigned n = 0, made = 0; double when[kAdaptiveMost] = {}; float phase[kAdaptiveMost] = {}; signed char what[kAdaptiveMost] = {}; };
 static double g_adaptive_next = 0.0;          // the next beat, the frame clock's seconds; 0: none yet
+// Round 93 - a Present is not sent the pair's work on its heels. When the presenter's next Present is due, and when
+// its last one went out (QPC seconds); the producer holds a pair's work back while a Present is a millisecond or two
+// away (FgClearOfPresent) - sent just before it, that work was on the card when the flip came and the flip waited for
+// it: with SMAI (4.8 ms of the network a pair) the real frame of every pair reached the screen 1.4 ms after its
+// Present where the frames in between took 0.5 (PresentMon, tests\smooth\pmtypes.py). SM_PRESENT_CLEAR=0: not held.
+static std::atomic<double> g_fg_present_due{0.0}, g_fg_present_went{0.0};
+static void FgClearOfPresent()
+{
+    static const bool off = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_PRESENT_CLEAR", v, sizeof(v)) > 0 && v[0] == '0'; }();
+    if (off) return;
+    const double due = g_fg_present_due.load(), now = LatencyNow();
+    if (due <= now - 0.0002 || due - now > 0.0020) return;
+    // (Until it went out, and three tenths of a millisecond more for the card to take it; never past 3 ms.)
+    while (LatencyNow() < due + 0.0015)
+    {
+        const double went = g_fg_present_went.load();
+        if (went >= due - 0.0005) { while (LatencyNow() < went + 0.0003) YieldProcessor(); return; }
+        SwitchToThread();
+    }
+}
 static double AdaptiveTarget();               // below (it needs the screen's refresh)
-static unsigned FgExtraFrames() { return g_fg_count; }
+// Round 58, back in round 95: a fixed multiplier's own beat (FgPresent sets it) - the game's average rate times the
+// multiplier, frames a second; 0 none. (1.1.0: or a whole number of a fixed refresh's - FitBeat.)
+static std::atomic<double> g_fixed_beat{0.0};
+// Round 92: the most a pair is shown with when the generator places no more by their moments (DLSS MFG through the
+// RTX 20/30 compatibility package, Intel's library: three) - 0 none. What the app is told runs.
+static unsigned g_fg_shown_most = 0;
+static unsigned FgExtraFrames() { return g_fg_shown_most ? std::min(g_fg_count, g_fg_shown_most) : g_fg_count; }
 // The pair at hand moved further than the generator follows (sm_guard.inl):
 // it gets no frames in between. Set by the loop before each FgPresent.
 static bool g_fg_too_fast = false;
@@ -257,10 +296,15 @@ static bool FgDumpWanted(UINT64 n) { return n == 30 || n == 90 || n == 150 || n 
 // thing steps a third of its way every second frame shown, evenly, while the
 // picture itself - everything the two real frames agree about - moves with
 // every frame. SM_FG_EVERY=1 (to compare): every frame from the generator.
+// Round 92 (tests\smooth - where each frame shown lands between its two real frames): with two made for x5 / x6, the
+// others "going by the nearest" showed what moves its own way (a character, a car - the triangles of the test) at the
+// nearest made frame's moment: x6 landed at 0, 1/3, 1/3, 2/3, 2/3, 0.88 - six pictures a pair and three moments, a
+// staircase worse than x3 itself (DLSS MFG x6 at 33 FPS: moments a quarter off 77%, held 18%). Every frame is made
+// now: 38% / 7%, at about 2 ms more of the card a pair. SM_FG_EVERY=0: two, as before (to compare).
 static unsigned FgMadeCount(unsigned count, bool rebuilt)
 {
-    static const bool every = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_FG_EVERY", v, sizeof(v)) > 0 && v[0] == '1'; }();
-    return (rebuilt && !every && count >= 4) ? 2u : count;
+    static const bool two = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_FG_EVERY", v, sizeof(v)) > 0 && v[0] == '0'; }();
+    return (rebuilt && two && count >= 4) ? 2u : count;
 }
 
 // Which of the generator's frames a frame in between goes by (0..made-1), or
@@ -321,8 +365,41 @@ static std::atomic<unsigned> g_fg_overrun{0};       // frames of pairs that gave
 
 static bool FgPipelined()
 {
-    static const bool serial = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_SERIAL", v, sizeof(v)) > 0 && v[0] == '1'; }();
-    return !serial && !MotionGiven();
+    // Round 94: one piece by default. The captured frame's conversion sent ahead of the generator's list was a piece
+    // of work of its own, and each piece takes the card from the game whatever it holds (tests\smooth\pieces64: a
+    // 64x64 copy sent 600 times a second took a GPU-bound GTA V from 91 frames a second to 71 - a third of a
+    // millisecond each). The Witcher 3 at 1440p, SMFG x3: 59.8 frames of the game a second pipelined (5 of 300 pairs
+    // late), 61.5 in one piece (0 of 310 late); DLSS MFG x4 55.6 -> 56.7. SM_SERIAL=0: pipelined, as before.
+    static const bool pipelined = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_SERIAL", v, sizeof(v)) > 0 && v[0] == '0'; }();
+    return pipelined && !MotionGiven();
+}
+
+// Round 85: how many of a pair's pictures the presenter keeps drawn ahead of the one it shows next. Drawn one by one
+// just before its moment (1, as before), a frame's drawing was the moment's own lateness: at the realtime class it
+// went first and took the card from the game every time (GTA V, x4: 80 FPS alone, 44 under SMFG, 3.6 - 6.7% of its
+// frames spikes), below it waited behind the game (drawing 0.7 ms became 3 ms, the screen a quarter less even). Drawn
+// ahead into pictures of the presenter's own (the swap chain's buffers may be written only in their turn: one written
+// ahead removed the device, 0x887A0005), at the moment only a copy onto the back buffer is left, the Present sent
+// behind it. One as before: DLSS MFG (it may refuse a pair's frames after they are drawn), two cards (the relay),
+// Spout, and while the frames are read back (a test's dumps, SM_DIAG's time stamps). SM_DRAW_AHEAD=<n> (to compare;
+// 1: as before).
+// Round 85b: and a pair with four frames in between or more (x5, x6): there each frame drawn ahead is a copy more on
+// the card - GTA V at x6, measured against the engine before in the same minutes, 6% fewer frames and 1 - 3 ms more
+// delay - and x6 had not the spikes x4 had (0.2 - 1.5% before). (The copy sent in the next frame's drawing instead,
+// one piece of work a frame: the gate failed, 3.1% spikes - a longer piece breaks into the game for longer.)
+static unsigned FgDrawAhead(bool reading_back, unsigned between)
+{
+    // Round 97: one, for SMFG too. Drawn ahead a frame in between was two pieces of work and two copies of the whole
+    // picture - into a picture of the presenter's, then onto the back buffer - where one of each does: The Witcher 3
+    // at 1440p, x4, 60.1 frames of the game a second drawn ahead (13 pieces a pair), 61.8 - 62.4 drawn straight (10),
+    // the frames on the screen as even either way (2.4 - 2.9% a quarter off against 1.3 - 2.9%). What round 85 drew
+    // ahead for - a frame's drawing being its moment's own lateness - is no longer so: each is drawn as soon as the
+    // one before it has been presented, by a thread at the highest priority (round 95). SM_DRAW_AHEAD=3: as before.
+    static const int asked = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_DRAW_AHEAD", v, sizeof(v)) > 0 ? atoi(v) : 1; }();
+    // (Round 85d: SMFG only - the spikes were SMFG's; XeSS MFG had none before, and drawn ahead its late pairs came to
+    // 3.3 - 5.5% in three gates against 3% allowed. DLSS MFG: above.)
+    if (asked <= 1 || reading_back || between >= 4 || !MsmSelected() || lfRelay.on || SpoutWanted()) return 1;
+    return std::min(static_cast<unsigned>(asked), 3u);
 }
 
 // The pending pair's work: waited for, and what it left read - whether the
@@ -425,6 +502,7 @@ static void StopFgPresentation()
     for (auto &slot : g_fg.slots)
     {
         slot.real.reset(); slot.before.reset(); slot.still = nullptr; slot.protect = false;
+        slot.hud = nullptr; slot.hud_on = false;
         for (auto &image : slot.interpolated) image = nullptr;
         slot.state = 0;
     }
@@ -444,7 +522,8 @@ static void CloseFgResources()
     // XeSS MFG: the library's swap chain goes before the pictures its frames were copied into.
     if (XeSelected()) XeClose();
     // MSM FG: what it works in (its passes stay).
-    if (MsmSelected()) MsmClose();
+    // (Round 101: also where the triangles read the motion for DLSS MFG or XeSS MFG - TriMotion works in SMFG's pictures.)
+    if (MsmSelected() || g_msm.full_w) MsmClose();
     if (g_fg.depth.gpu_tex) { g_fg.depth.gpu_tex->Release(); g_fg.depth.gpu_tex = nullptr; }
     if (g_fg.depth.staging) { g_fg.depth.staging->Release(); g_fg.depth.staging = nullptr; }
     for (auto &image : g_fg.output) image = nullptr;
@@ -473,6 +552,14 @@ static void FgPresenter()
 {
     g_fg_count_cap = 0;
     g_fg_overrun = 0;
+    // Round 95: the thread that puts every frame on the screen at its moment ran at the priority of any other, and
+    // waited out the last eight tenths of a millisecond by giving its turn away (SwitchToThread) - beside a game
+    // that keeps every core busy, a turn given away comes back when the game lets it: the time between two Presents
+    // moved 5% or more for one frame in ten (The Witcher 3, x3 - tests\smooth\flat.py) where Lossless Scaling's moved
+    // 2%. Highest priority (as FSR's frame generation gives its presenter), and the last quarter of a millisecond
+    // spent looking at the clock. SM_PRESENTER_PLAIN=1: as before (to compare).
+    static const bool presenter_plain = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_PRESENTER_PLAIN", v, sizeof(v)) > 0 && v[0] == '1'; }();
+    if (!presenter_plain) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     // Four allocators in turn: a frame's list may still be on the card when
     // the next one is recorded (`quick`, below), and an allocator is not to be
     // reset under a list of its own that is.
@@ -610,6 +697,11 @@ static void FgPresenter()
                   "(in between), the Present %.2f ms after %.2f ms waiting for the screen",
                   pace.delay * 1000.0, FgQueueTarget(), pace.late, pace.pairs, pace.skipped, pace.dropped,
                   pace.lead[0] * 1000.0, pace.lead[1] * 1000.0, pace.call * 1000.0, pace.waited * 1000.0);
+            {
+                const unsigned loop = g_pieces[0].exchange(0), show = g_pieces[1].exchange(0), cap = g_pieces[2].exchange(0), flips = g_pieces[3].exchange(0);
+                Trace("[pieces] sent to the card in these %u pairs: %u by the loop, %u by the presenter, %u by the capture, %u Presents - %.1f a pair",
+                      pace.pairs, loop, show, cap, flips, static_cast<double>(loop + show + cap + flips) / pace.pairs);
+            }
             if (still_frames) Trace("[dlssg] still pixels: %u frames in between kept their still parts from the real frame", still_frames);
             if (draw_count[0] && draw_count[1])
                 Trace("[cost] drawing on the card: a real frame %.2f ms, a frame in between %.2f ms", draw_cost[0] / draw_count[0],
@@ -666,7 +758,8 @@ static void FgPresenter()
                 if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 60);
                 else Sleep(left > 0.003 ? 1 : 0);
             }
-            else SwitchToThread();
+            else if (presenter_plain || left > 0.00025) SwitchToThread();
+            else YieldProcessor();
         }
     };
     // Exactly one consumer and one wait per Present, including the first.
@@ -714,17 +807,22 @@ static void FgPresenter()
         return SUCCEEDED(alloc->Reset()) && SUCCEEDED(list->Reset(alloc, nullptr));
     };
     auto send = [&](bool wait = true) {
-        if (FAILED(list->Close())) return false;
+        const HRESULT closed = list->Close();
+        if (FAILED(closed)) { Trace("[dlssg] a drawing's list did not close (0x%08X)", (unsigned)closed); return false; }
         ID3D12CommandList *commands[] = {list.get()};
         if (after_mark && lfCore.show_queue != lfCore.direct_queue) lfCore.show_queue->Wait(lfCore.timeline, after_mark);
         XeAfter(lfCore.show_queue, after_taken);
         lfCore.show_queue->ExecuteCommandLists(1, commands);
+        ++g_pieces[1];
         if (FAILED(lfCore.show_queue->Signal(fence.get(), ++value))) return false;
         SpoutAfter(lfCore.show_queue);
         alloc_mark[alloc_at] = value;
         if (!wait) return true;
-        return SUCCEEDED(fence->SetEventOnCompletion(value, event)) &&
-               WaitForSingleObject(event, 2000) == WAIT_OBJECT_0 && fence->GetCompletedValue() >= value;
+        if (SUCCEEDED(fence->SetEventOnCompletion(value, event)) &&
+            WaitForSingleObject(event, 2000) == WAIT_OBJECT_0 && fence->GetCompletedValue() >= value) return true;
+        Trace("[dlssg] a drawing was not done in two seconds (fence %llu of %llu; the card: 0x%08X)", fence->GetCompletedValue(), value,
+              (unsigned)lfCore.device->GetDeviceRemovedReason());
+        return false;
     };
     auto dump = [&](UINT64 sequence, unsigned index) {
         char dir[MAX_PATH] = {};
@@ -768,10 +866,43 @@ static void FgPresenter()
     // phase: where a frame in between lies between its two real frames.
     // raw (XeSS MFG): source is a picture the library drew its frame into (xe_tap.h) - at rest as a back
     // buffer is, not as a copy source like every other picture here: turned for this drawing, and turned back.
-    auto draw = [&](ID3D12Resource *source, bool synthetic, float phase, float made_phase, bool raw) {
+    // Round 85: pictures drawn ahead of their turn (FgDrawAhead), in turn - the copy of one onto the back buffer is
+    // always sent before it is drawn into again. At rest as a back buffer is (COMMON, the same as PRESENT).
+    winrt::com_ptr<ID3D12Resource> ahead_pictures[4];
+    unsigned ahead_next = 0;
+    auto aheadPicture = [&](ID3D12Resource *like) -> ID3D12Resource * {
+        winrt::com_ptr<ID3D12Resource> &own = ahead_pictures[ahead_next++ % 4];
+        D3D12_RESOURCE_DESC want = like->GetDesc();
+        if (own)
+        {
+            const D3D12_RESOURCE_DESC have = own->GetDesc();
+            if (have.Width == want.Width && have.Height == want.Height && have.Format == want.Format) return own.get();
+            own = nullptr;
+        }
+        want.Alignment = 0;
+        want.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_HEAP_PROPERTIES heap = {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        const HRESULT made = lfCore.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &want, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                    IID_PPV_ARGS(own.put()));
+        if (FAILED(made)) { Trace("[dlssg] no picture to draw a frame ahead into (0x%08X)", (unsigned)made); own = nullptr; }
+        return own.get();
+    };
+    ID3D12Resource *drawn_into = nullptr;   // the last draw's own picture; null: the back buffer itself
+    // ahead: drawn ahead of the frame shown next - into a picture of the presenter's own (aheadPicture), not the back
+    // buffer; wait: for the card to be through with it before going on.
+    auto draw = [&](ID3D12Resource *source, bool synthetic, float phase, float made_phase, bool raw, unsigned ahead, bool wait) {
         winrt::com_ptr<ID3D12Resource> bb;
-        if (FAILED(ShowBackBuffer(IID_PPV_ARGS(bb.put()))) ||
-            !take()) return false;
+        drawn_into = nullptr;
+        if (FAILED(ShowBackBuffer(IID_PPV_ARGS(bb.put())))) return false;
+        if (ahead > 0)
+        {
+            ID3D12Resource *own = aheadPicture(bb.get());
+            if (!own) return false;
+            bb.copy_from(own);
+            drawn_into = own;
+        }
+        if (!take()) return false;
         if (stamps) list->EndQuery(stamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
         RebuildMarks marks = { stamps.get(), 1, false };
         auto pre = Barrier(bb.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -795,6 +926,11 @@ static void FgPresenter()
         const bool fits = target && real && real->full && target->GetDesc().Width == real->full->GetDesc().Width &&
                           target->GetDesc().Height == real->full->GetDesc().Height;
         const bool mapped = showing && showing->protect && showing->still && g_fg_still.ready;
+        // Round 90, SMHUD (sm_hud.h): this pair's HUD map - the frame is finished beside the back buffer, then the HUD
+        // pass takes it from there to a picture of its own, which is shown.
+        // (SM_HUD_NOSHOW=1, tests: the network runs, its maps are not used - what the pass on the frames costs, apart.)
+        static const bool hud_no_show = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_HUD_NOSHOW", v, sizeof(v)) && v[0] == '1'; }();
+        const bool hud_here = synthetic && showing && showing->hud_on && showing->hud && real && real->full && smhud::Showable() && !hud_no_show;
         bool through_target = true, direct = false, read_back = false;
         if (synthetic && fits && real->low && g_rebuild.ready) {
             FgReal *before = showing->before && showing->before->low ? showing->before.get() : real;
@@ -811,13 +947,19 @@ static void FgPresenter()
             // (Nor while it is sharpened on its way: that is done from a picture of its own, ShowBlit.)
             // (Nor while it is shared as a Spout sender: that is taken from where ShowBlit puts it.)
             direct = (!dumps || dump_direct) && !lfShow.upscaling && !SharpenInBlit() && !SpoutWanted() && bd.Width == td.Width && bd.Height == td.Height &&
-                     bd.Format == td.Format && RebuildDrawReady(bd.Format);
+                     bd.Format == td.Format && RebuildDrawReady(bd.Format) && !(hud_here && smhud::DrawFailed());
             read_back = direct && dumps;
             RebuildShow(list.get(), source, real->full.get(), real->low.get(), before->full.get(), before->low.get(),
                         mapped ? showing->still.get() : nullptr, target, phase, made_phase, showing->prior, showing->sequence, &marks,
                         direct ? bb.get() : nullptr, alloc_at);
             if (mapped) ++still_frames;
             if (direct) through_target = false;
+            // (SMHUD: the HUD drawn over it there, the HUD's pixels only.)
+            if (direct && hud_here)
+            {
+                FgReal *hud_before = showing->before && showing->before->full ? showing->before.get() : real;
+                smhud::Draw(list.get(), bb.get(), hud_before->full.get(), real->full.get(), showing->hud.get(), phase);
+            }
         } else if (synthetic && fits && mapped && !real->low) {
             FgStillShow(list.get(), source, real->full.get(), showing->still.get(), target);
             ++still_frames;
@@ -825,15 +967,32 @@ static void FgPresenter()
             target = g_fg_scale.display.get();
             FgScaleRecord(list.get(), source, D3D12_RESOURCE_STATE_COPY_SOURCE, target, true);
         } else through_target = false;
-        if (through_target) {
+        // (SMHUD: from the finished frame - the target, or the generator's own at the picture's size - to its picture.)
+        ID3D12Resource *hud_into = nullptr;
+        if (hud_here && !direct)
+        {
+            FgReal *hud_before = showing->before && showing->before->full ? showing->before.get() : real;
+            hud_into = smhud::Show(list.get(), through_target ? target : source,
+                                   through_target ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   hud_before->full.get(), real->full.get(), showing->hud.get(), phase);
+            // (Done in place on the target: it is shown from there, as always.)
+            if (through_target && hud_into == target) hud_into = nullptr;
+        }
+        if (hud_into) {
+            auto ready = Barrier(hud_into, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1, &ready);
+            ShowBlit(list.get(), bb.get(), hud_into);
+            auto rest = Barrier(hud_into, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &rest);
+        } else if (through_target) {
             auto ready = Barrier(target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             list->ResourceBarrier(1, &ready);
             ShowBlit(list.get(), bb.get(), target);
             auto rest = Barrier(target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             list->ResourceBarrier(1, &rest);
         } else if (!direct) ShowBlit(list.get(), bb.get(), source);
-        shown_from = through_target ? target : direct ? (read_back ? bb.get() : nullptr) : source;
-        shown_state = through_target ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : direct || raw ? D3D12_RESOURCE_STATE_PRESENT : D3D12_RESOURCE_STATE_COPY_SOURCE;
+        shown_from = hud_into ? hud_into : through_target ? target : direct ? (read_back ? bb.get() : nullptr) : source;
+        shown_state = hud_into || through_target ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : direct || raw ? D3D12_RESOURCE_STATE_PRESENT : D3D12_RESOURCE_STATE_COPY_SOURCE;
         if (raw)
         {
             auto back = Barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
@@ -855,7 +1014,7 @@ static void FgPresenter()
             list->ResolveQueryData(stamps.get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, kRebuildMarks, stamps_back.get(), 0);
         }
         // (A frame read back - for its cost, or by a test - is waited for.)
-        if (!send(!quick || stamps)) return false;
+        if (!send(wait || stamps)) return false;
         if (stamps)
         {
             UINT64 *at = nullptr;
@@ -875,6 +1034,19 @@ static void FgPresenter()
             }
         }
         return true;
+    };
+    // Round 85: a picture drawn ahead (aheadPicture) onto the back buffer, not waited for - the Present goes behind it.
+    auto copyOnto = [&](ID3D12Resource *picture) {
+        winrt::com_ptr<ID3D12Resource> bb;
+        if (FAILED(ShowBackBuffer(IID_PPV_ARGS(bb.put()))) || !take()) return false;
+        D3D12_RESOURCE_BARRIER in[2] = { Barrier(bb.get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
+                                         Barrier(picture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE) };
+        list->ResourceBarrier(2, in);
+        list->CopyResource(bb.get(), picture);
+        D3D12_RESOURCE_BARRIER out[2] = { Barrier(bb.get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
+                                          Barrier(picture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON) };
+        list->ResourceBarrier(2, out);
+        return send(false);
     };
     // Round 38, "waves": how far behind the game's world each frame is at the moment the screen showed it (the
     // swap chain's own word, after each Present: the last one it showed and when) - the same in smooth motion; a
@@ -949,7 +1121,7 @@ static void FgPresenter()
             // The window is hidden (minimised target): benign.
             return true;
         }
-        if (FAILED(pr)) return false;
+        if (FAILED(pr)) { Trace("[dlssg] the Present was refused (0x%08X)", (unsigned)pr); return false; }
         ShowRevealOnce();
         ++shown;
         if (synthetic) ++generated;
@@ -990,6 +1162,13 @@ static void FgPresenter()
     // drawings, came out of the next pair's first frames, which were then
     // late and passed over.
     std::vector<std::pair<FgSlot *, UINT64>> held_pairs;
+    // Round 95, the beat: a pair's real frame is shown only when a beat falls on it; the next pair's beats go on from
+    // it. When no next pair comes - the game stopped: a menu, a pause, a stall - the screen was left on a frame in
+    // between, short of the game's last picture (tests\smooth: "held 247 beats" over the stand-in's pause, the picture
+    // 0.2 of a pair behind), and what stands still is looked at. The last pair's real frame, kept until the next
+    // pair is taken up or two beats have gone by without one: then it is shown.
+    std::shared_ptr<FgReal> tail;
+    double tail_moment = 0.0, tail_source = 0.0, tail_beat = 0.0;
     auto release = [&](bool wait) {
         while (!held_pairs.empty())
         {
@@ -1023,13 +1202,27 @@ static void FgPresenter()
         FgSlot *chosen = nullptr;
         {
             std::unique_lock<std::mutex> lock(g_fg.mutex);
-            const bool ready = g_fg.wake.wait_for(lock, std::chrono::milliseconds(250), [] {
+            // (Round 95: a pair shown by the beat whose real frame no beat fell on - `tail`: that frame is shown after
+            // all when nothing follows within two beats of its time.)
+            const auto patience = std::chrono::microseconds(!tail ? 250000LL :
+                std::clamp(static_cast<long long>((tail_moment + pace.delay + 2.0 * tail_beat - LatencyNow()) * 1e6), 500LL, 250000LL));
+            const bool ready = g_fg.wake.wait_for(lock, patience, [] {
                 if (g_fg.stop) return true;
                 for (auto &s : g_fg.slots) if (s.state == 2) return true;
                 return false;
             });
             if (g_fg.stop) break;
+            if (!ready && tail)
+            {
+                lock.unlock();
+                const std::shared_ptr<FgReal> last = std::move(tail);
+                tail.reset();
+                showing = nullptr;
+                if (last->full && draw(last->full.get(), false, 1.0f, 1.0f, false, 0, true)) flip(false, tail_source);
+                continue;
+            }
             if (!ready) { lock.unlock(); reportCadence(); continue; }
+            tail.reset();
             // In order (lf_fg_pace.inl): the oldest pair first. Only a pair
             // whose real frame's time has already gone by while a newer one
             // waits is passed over - the presenter fell a whole pair behind.
@@ -1084,7 +1277,13 @@ static void FgPresenter()
         bool scheduled = chosen->interpolate && span > 0.0 && !irregular;
         pace.cover_all = chosen->ad_on && chosen->interpolate;
         quick = chosen->interpolate && step > 0.0 && step < 0.0035 && !dumped;
-        if (!chosen->interpolate) pace.Forget();
+        // Round 91 (tests\smooth: GitHub #83's "as if MFG switched off and on"): a pair with nothing in between - the
+        // first after the game rested, after a cut, the generator starting fresh - forgot the delay and showed its
+        // real frame at once; the next pair was shown at the delay again, so that frame stood the delay longer than
+        // any other: 57 - 63 ms on the screen after a pause, measured with every generator. The delay is the pipe's,
+        // not the picture's: it is kept, and such a real frame is shown at its moment + the delay like any other.
+        const bool keep_beat = !chosen->interpolate && pace.delay > 0.0 && !dumped;
+        if (!chosen->interpolate && !keep_beat) pace.Forget();
         after_mark = chosen->mark;
         after_taken = chosen->taken;
         // What the pair asks of the delay is known once its first picture is
@@ -1109,8 +1308,29 @@ static void FgPresenter()
             const double need = done - chosen->prev_moment - first_step + pace.lead[chosen->count ? 1 : 0] + pace.call + 0.0003;
             // A stall (the game loading, the card taken away for a moment):
             // shown as it comes, and not taken for the delay to keep.
+            // Round 93: a frame of the game that came late (a hitch: 60 ms where the others take 25) is that pair's own
+            // lateness, not a need of the pipe's. Counted as one, the delay went up 12 ms for the next 96 pairs - two and
+            // a half seconds of every picture shown later, then let go at once: the game slower, then faster, after
+            // every hitch of its own (tests\smooth, the delay's line). What the pair is longer than the usual by (a
+            // quarter over it and more) is left out of what it asks; its frames come as soon as they can (slip, below).
+            // SM_HITCH_NEED=1: counted, as before (to compare).
+            static const bool hitch_counts = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_HITCH_NEED", v, sizeof(v)) > 0 && v[0] == '1'; }();
+            // (Only a hitch by itself: a game whose frames are long again and again - 12, 21, 33 ms in turn - asks that
+            // of the pipe for good, and left out there every third pair came late. The second long pair within 96 is
+            // a pattern, counted from then on as before.)
+            static UINT64 last_long = 0;            // the long pair before this one (its number)
+            const bool is_long = pace.usual > 0.0 && span > 1.25 * pace.usual;
+            const bool pattern = is_long && last_long != 0 && chosen->sequence - last_long < 96;
+            if (is_long) last_long = chosen->sequence;
+            const double longer = is_long && !pattern && !hitch_counts ? span - 1.25 * pace.usual : 0.0;
+            const double own = longer * double(chosen->count) / double(chosen->count + 1);
             if (pace.delay > 0.0 && need > pace.delay + std::max(0.05, 2.0 * span)) { scheduled = false; ++pace.late; ++pace.pairs; }
-            else pace.Took(need, step);
+            else
+            {
+                const bool late_before = need > pace.delay && pace.delay > 0.0;
+                const bool counted = pace.Took(need - own, step);
+                if (own > 0.0 && late_before && !counted) ++pace.late;
+            }
             // SM_DIAG=1: the first pairs' needs, and the delay they leave.
             static const bool diag = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_DIAG", v, sizeof(v)) > 0 && v[0] == '1'; }();
             if (diag && pace.count <= 16)
@@ -1120,7 +1340,18 @@ static void FgPresenter()
         };
         // (Adaptive MFG: the place between the two real frames of the beat being shown; -1 none.)
         double ad_phase_now = -1.0;
-        auto show = [&](ID3D12Resource *picture, bool synthetic, double moment, double source_time, unsigned index) {
+        // Round 85: the pair's pictures in the order they are shown - drawn ahead of their moments, as many as
+        // FgDrawAhead says, each into the swap chain's buffer it is shown from, and presented at their moments.
+        // pass_at: past it (plus the delay, and what the pair is let slip) the picture is passed over instead of
+        // drawn - 0: never; slip_phase: its place between the real frames for that slip, -1: none.
+        struct Planned { ID3D12Resource *picture; bool synthetic; double moment, source_time; unsigned index; double ad_phase, pass_at, slip_phase; };
+        // One drawn and not yet shown: when its drawing was asked and came back, its mark on the presenter's fence.
+        struct Drawn { size_t item; double began, drawn; UINT64 mark; bool waited; unsigned ahead; float phase; ID3D12Resource *picture; };
+        auto prepare = [&](const Planned &f, unsigned ahead, Drawn &d) {
+            ad_phase_now = f.ad_phase;
+            ID3D12Resource *picture = f.picture;
+            const bool synthetic = f.synthetic;
+            const unsigned index = f.index;
             const double began = LatencyNow();
             const float phase = ad_phase_now >= 0.0 ? float(ad_phase_now) : synthetic ? float(index + 1) / float(chosen->count + 1) : 1.0f;
             // The generator's frame it goes by: its own, or the nearest there is.
@@ -1146,17 +1377,51 @@ static void FgPresenter()
             }
             // XeSS MFG says at once when a pair has no frames in between (xe_mfg.inl, XeMake): there is nothing
             // of the library's to draw then.
-            if (synthetic && XeSelected() && chosen->denied.load()) { ++denied_frames; return; }
+            if (synthetic && XeSelected() && chosen->denied.load()) { ++denied_frames; return 0; }
             const bool raw = synthetic && XeSelected() && !(chosen->real && picture == chosen->real->low.get());
-            if (!draw(picture, synthetic, phase, made_phase, raw)) { g_fg.failed = true; return; }
+            // Drawn ahead, it is not waited for here: its moment is a frame or more away.
+            const bool wait = ahead == 0 && !quick;
+            if (!draw(picture, synthetic, phase, made_phase, raw, ahead, wait)) { g_fg.failed = true; return -1; }
             if (synthetic) dump(chosen->sequence - 1, index + 1);
-            const double drawn = LatencyNow();
+            d = { 0, began, LatencyNow(), value, wait || stamps, ahead, phase, drawn_into };
             stood("drawing a frame (waiting for the card)", began);
+            return 1;
+        };
+        auto present = [&](const Planned &f, const Drawn &d) {
+            ad_phase_now = f.ad_phase;
+            const bool synthetic = f.synthetic;
+            const double moment = f.moment, source_time = f.source_time;
+            const unsigned index = f.index;
+            const float phase = d.phase;
+            const double began = d.began;
+            double drawn = d.drawn;
+            // Drawn ahead: as a rule the card was through with it long before now. (A quick pair's Present goes behind
+            // its drawing on the card by itself, as before.)
+            if (!d.waited && !quick && fence->GetCompletedValue() < d.mark)
+            {
+                FgAwaitPatient(fence.get(), d.mark);
+                drawn = LatencyNow();
+            }
+            // Round 91 (tests\smooth, PresentMon): a picture drawn ahead was copied onto the back buffer at its moment, and
+            // that copy took its turn on the card behind whatever was there - the next pair's work, the capture's -
+            // so the screen showed it 1.4 ms after its Present when late (0.45 when not), in a pattern that came back
+            // every pair: SMFG 9.4% of the gaps on the screen a quarter off, DLSS MFG (drawn into the back buffer
+            // right after the frame before) 3%. Now it goes onto the back buffer at once, while its moment is still to
+            // come; at the moment only the Present is left, with nothing on the card before it. SM_COPY_EARLY=0: at
+            // the moment, as before (to compare).
+            static const bool copy_early = [] { char v[4] = {}; return !(GetEnvironmentVariableA("SM_COPY_EARLY", v, sizeof(v)) && v[0] == '0'); }();
+            bool copied = false;
+            if (copy_early && d.picture && !quick)
+            {
+                if (!copyOnto(d.picture)) { g_fg.failed = true; return; }
+                copied = true;
+            }
             const bool led = first;
             if (first) { first = false; schedule(began, drawn, ad_phase_now >= 0.0 ? moment : 0.0); }
             // The generator said, once its work was done, that this pair has
             // no frames in between to show: the next picture is drawn over it.
-            if (synthetic && chosen->denied.load()) { ++denied_frames; return; }
+            // (Only one at a time is drawn where that can come after the drawing: DLSS MFG, FgDrawAhead.)
+            if (synthetic && d.ahead == 0 && chosen->denied.load()) { ++denied_frames; return; }
             // A frame's moment far ahead of now is no moment to wait for (round 11: a session's log showed the
             // presenter standing for two seconds while frames kept being taken - "very bad lag" - and nothing in
             // it that said where). It is shown now, and the delay learnt anew.
@@ -1168,7 +1433,12 @@ static void FgPresenter()
                 if (led && synthetic)
                 {
                     const double late_by = LatencyNow() - (moment + pace.delay - pace.call);
-                    if (late_by > 0.0005 && late_by < span) { slip = late_by; slip_from = phase_now; }
+                    // (Round 96, Ultra Smooth: not made up within the pair - its frames stay a step apart and every
+                    // frame after it is that much later: the delay is what the late frame left it, and comes back
+                    // slowly (FgPace::Took). Made up, the pair's frames stood closer than a step - the picture faster
+                    // for a pair after every frame that came late.)
+                    if (SmoothOn() && late_by > 0.0005 && late_by < span) pace.delay += late_by;
+                    else if (late_by > 0.0005 && late_by < span) { slip = late_by; slip_from = phase_now; }
                 }
                 const double when = moment + pace.delay - pace.call + slipped(phase_now), ahead = when - LatencyNow();
                 if (ahead > 0.25)
@@ -1183,7 +1453,18 @@ static void FgPresenter()
                     pace.Forget();
                     scheduled = false;
                 }
-                else if (!waitUntil(when)) return;
+                else
+                {
+                    // (1.1.0: on a fit beat, half a refresh after a refresh - FitSnap, lf_vrr.inl.)
+                    const double at = g_fixed_beat.load() > 0.0 ? FitSnap(when) : when;
+                    g_fg_present_due = at; if (!waitUntil(at)) return;
+                }
+            }
+            else if (keep_beat && !synthetic)
+            {
+                // (Round 91: its moment + the delay, as every frame; already past, or far off - a start - at once.)
+                const double when = moment + pace.delay - pace.call, ahead = when - LatencyNow();
+                if (ahead > 0.0 && ahead <= 0.25 && !waitUntil(when)) return;
             }
             const double asked = LatencyNow();
             // A pair with more frames than the screen has refreshes for it
@@ -1196,12 +1477,43 @@ static void FgPresenter()
             trace_content = moment;
             trace_phase = phase;
             const double called = LatencyNow();
+            // Drawn ahead: onto the back buffer now, the Present behind it on the card (round 91: unless done already).
+            if (d.picture && !copied && !copyOnto(d.picture)) { g_fg.failed = true; return; }
             if (!flip(synthetic, source_time)) g_fg.failed = true;
             else if (synthetic) { ++made_shown; ++given_shown; }
+            g_fg_present_went = LatencyNow();
             wave(moment);
             stood("the Present", called);
-            pace.Took(led ? -1.0 : drawn - began, called - asked, LatencyNow() - called, synthetic);
+            // (What drawing takes is learnt from frames drawn just before their moments only.)
+            pace.Took(led || d.ahead ? -1.0 : drawn - began, called - asked, LatencyNow() - called, synthetic);
         };
+        // The plan run: drawn up to `window` ahead of the one shown next; one is as before - drawn, then shown.
+        auto run = [&](const std::vector<Planned> &plan, unsigned window) {
+            std::deque<Drawn> ready;
+            size_t next = 0;
+            while (!g_fg.stop && !g_fg.failed)
+            {
+                while (next < plan.size() && ready.size() < window && !g_fg.stop && !g_fg.failed)
+                {
+                    const Planned &f = plan[next];
+                    // Too late to be told from the next one: shown now it would only push that one back (the
+                    // two-at-once of before).
+                    if (f.pass_at > 0.0 && LatencyNow() > f.pass_at + pace.delay + (f.slip_phase >= 0.0 ? slipped(f.slip_phase) : 0.0))
+                    { ++pace.skipped; ++late_frames; ++next; continue; }
+                    Drawn d = {};
+                    const int got = prepare(f, static_cast<unsigned>(ready.size()), d);
+                    if (got < 0) return;
+                    if (got > 0) { d.item = next; ready.push_back(d); }
+                    ++next;
+                }
+                if (ready.empty()) return;
+                const Drawn d = ready.front();
+                ready.pop_front();
+                present(plan[d.item], d);
+            }
+        };
+        std::vector<Planned> plan;
+        plan.reserve(8);
         if (irregular) { pace.skipped += chosen->count; odd_frames += chosen->count; }
         // Adaptive MFG: each beat at its own moment - a frame in between made for it, or a real frame near it.
         if (chosen->ad_on && chosen->interpolate && !irregular)
@@ -1209,37 +1521,44 @@ static void FgPresenter()
             const double beat_fps = AdaptiveTarget();
             const double beat = beat_fps > 0.0 ? 1.0 / beat_fps : step;
             CounterGameFrame(chosen->source_time);
-            for (unsigned b = 0; b < chosen->adaptive && !g_fg.stop && !g_fg.failed; ++b)
+            for (unsigned b = 0; b < chosen->adaptive; ++b)
             {
                 const signed char what = chosen->ad_what[b];
                 const double when = chosen->ad_when[b];
-                // (DLSS MFG: any of its frames - show() takes the one nearest the beat.)
+                // (DLSS MFG: any of its frames - prepare() takes the one nearest the beat.)
                 ID3D12Resource *picture = what >= 0 ? chosen->interpolated[MsmSelected() ? what : 0].get() : what == -1 ? chosen->real->full.get() :
                                           chosen->before ? chosen->before->full.get() : nullptr;
                 if (!picture) continue;
-                if (!dumped && LatencyNow() > when + pace.delay + 0.75 * beat) { ++pace.skipped; ++late_frames; continue; }
-                ad_phase_now = chosen->ad_phase[b];
-                show(picture, what >= 0, when, what >= 0 ? 0.0 : chosen->source_time, what >= 0 ? static_cast<unsigned>(what) : 0u);
+                plan.push_back({ picture, what >= 0, when, what >= 0 ? 0.0 : chosen->source_time, what >= 0 ? static_cast<unsigned>(what) : 0u,
+                                 chosen->ad_phase[b], dumped ? 0.0 : when + 0.75 * beat, -1.0 });
             }
-            ad_phase_now = -1.0;
         }
         else if (chosen->interpolate && !irregular)
         {
-            for (unsigned index = 0; index < chosen->count && !g_fg.stop && !g_fg.failed; ++index)
+            for (unsigned index = 0; index < chosen->count; ++index)
             {
                 const double moment = chosen->prev_moment + step * (index + 1);
-                // Too late to be told from the next one: shown now it would
-                // only push that one back (the two-at-once of before).
                 // (A quick pair's frames are a millisecond and a half apart: up to three of them behind, a frame
                 // is still shown in its turn. Further behind it is passed over, and the count a pair follows what
                 // reaches the screen - more real frames with fewer between them, not pairs dropped whole: measured,
                 // 97 pairs with three each against 67 with five, the same 400 frames a second on a 200 Hz screen.)
-                if (!dumped && LatencyNow() > moment + pace.delay + slipped(double(index + 1) / double(chosen->count + 1)) + (quick ? 3.0 : 0.75) * step) { ++pace.skipped; ++late_frames; continue; }
-                show(chosen->interpolated[index].get(), true, moment, 0.0, index);
+                plan.push_back({ chosen->interpolated[index].get(), true, moment, 0.0, index, -1.0,
+                                 dumped ? 0.0 : moment + (quick ? 3.0 : 0.75) * step, double(index + 1) / double(chosen->count + 1) });
             }
         }
-        if (!g_fg.stop && !g_fg.failed && !(chosen->ad_on && chosen->interpolate && !irregular))
-            show(chosen->real->full.get(), false, chosen->moment, chosen->source_time, 0);
+        if (!(chosen->ad_on && chosen->interpolate && !irregular))
+            plan.push_back({ chosen->real->full.get(), false, chosen->moment, chosen->source_time, 0, -1.0, 0.0, -1.0 });
+        run(plan, FgDrawAhead(stamps != nullptr || dumping, plan.empty() ? 0u : static_cast<unsigned>(plan.size() - 1)));
+        if (chosen->ad_on && chosen->interpolate && !irregular && chosen->real && chosen->real->full &&
+            (plan.empty() || plan.back().synthetic || plan.back().picture != chosen->real->full.get()))
+        {
+            const double beat_fps = AdaptiveTarget();
+            tail = chosen->real;
+            tail_moment = chosen->moment;
+            tail_source = chosen->source_time;
+            tail_beat = beat_fps > 0.0 ? 1.0 / beat_fps : step;
+        }
+        ad_phase_now = -1.0;
         showing = nullptr;
         after_mark = 0;
         after_taken = 0;
@@ -1315,7 +1634,7 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
     if ((XeSelected() ? XeLive() : MsmSelected() ? MsmLive(full_w, full_h, format, FlowShare()) : g_fg.feature != nullptr) &&
         g_fg.w == w && g_fg.height == height && g_fg.mw == v.work_w &&
         g_fg.mh == v.work_h && g_fg.full_w == full_w && g_fg.full_h == full_h &&
-        g_fg.format == format && g_fg.thread.joinable()) return true;
+        g_fg.format == format && g_fg.room == FgRoom() && g_fg.thread.joinable()) return true;
     CloseFgResources();
     // XeSS MFG: nothing of NGX. Its own swap chain is made further down
     // (XeReady), once the pictures it copies into are there.
@@ -1364,8 +1683,36 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
             const auto patched = lf_ada::Apply(base, nt->OptionalHeader.SizeOfImage, 89);
             g_fg_runtime_max = patched.applied ? 5u : 1u;
             g_fg_count = std::min(g_fg_count, g_fg_runtime_max);
-            Trace("[dlssg] Ada temporal kernels: %u containers; %s", patched.containers,
+            Trace("[dlssg] Ada temporal kernels: %u containers, count gate %s; %s", patched.containers, patched.gate ? "opened" : "not found",
                   patched.applied ? "MFG up to 6x enabled" : "unrecognized runtime, limited to 2x");
+        }
+    }
+    // Round 85: XeSS-FG on the tensor cores - through the NGX core started on the device (NgxStart), where
+    // the compatibility package takes the evaluation over (lf_dlssg_compat.inl, FgXessTensor).
+    if (NgxSelected() && !g_fg.initialized && FgXessTensor())
+    {
+        if (!lfCore.ngx_ready) { Trace("[dlssg] unavailable: XeSS on the tensor cores needs the NGX core, which did not start"); return false; }
+        // (The library defines the overload with a non-const parameter block; the block is only read.)
+        g_fg.create = reinterpret_cast<NrCreateFn>(static_cast<NVSDK_NGX_Result (NVSDK_CONV *)(ID3D12GraphicsCommandList *, NVSDK_NGX_Feature, NVSDK_NGX_Parameter *, NVSDK_NGX_Handle **)>(&NVSDK_NGX_D3D12_CreateFeature));
+        g_fg.release = &NVSDK_NGX_D3D12_ReleaseFeature;
+        g_fg_evaluate = &NVSDK_NGX_D3D12_EvaluateFeature;
+        if (!g_fg.params && NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&g_fg.params))) return false;
+        g_fg.initialized = true;
+        Trace("[dlssg] the generator goes through the NGX core (XeSS-FG on the tensor cores)");
+        // (Round 86, RTX 40: its runtime takes two frames a pair from an Ada card - the package's copy is opened before the
+        // core opens it, and adapted as the engine's own copy is (lf_dlssg_ada.h). Not run on an RTX 40 here; its log says.)
+        if (FgComputeCapability() == 89 && !g_compat_runtime.empty())
+        {
+            if (HMODULE runtime = LoadLibraryW(g_compat_runtime.c_str()))
+            {
+                auto base = reinterpret_cast<BYTE *>(runtime);
+                auto nt = reinterpret_cast<IMAGE_NT_HEADERS64 *>(base + reinterpret_cast<IMAGE_DOS_HEADER *>(base)->e_lfanew);
+                const auto patched = lf_ada::Apply(base, nt->OptionalHeader.SizeOfImage, 89);
+                if (!patched.applied) g_fg_count = std::min(g_fg_count, 1u);
+                Trace("[dlssg] XeSS on the tensor cores, RTX 40: the package's runtime adapted (%u containers, count gate %s) - %s",
+                      patched.containers, patched.gate ? "opened" : "not found", patched.applied ? "up to 4x" : "2x");
+            }
+            else Trace("[dlssg] XeSS on the tensor cores, RTX 40: the package's runtime did not open (%lu) - 2x", GetLastError());
         }
     }
     if (NgxSelected() && !g_fg.initialized)
@@ -1412,13 +1759,14 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
     auto b = Barrier(g_fg.depth.gpu_tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     lfCore.cmd->ResourceBarrier(1, &b);
     if (!FgAwait(lfCore.timeline, CmdSubmit(), 30000)) return false;
-    for (unsigned i = 0; i < g_fg_count; ++i)
+    g_fg.room = FgRoom();
+    for (unsigned i = 0; i < g_fg.room; ++i)
     {
         g_fg.output[i].attach(NewTexture(w, height, format, true));
         if (!g_fg.output[i]) return false;
     }
     for (auto &slot : g_fg.slots)
-        for (unsigned i = 0; i < g_fg_count; ++i)
+        for (unsigned i = 0; i < g_fg.room; ++i)
         {
             slot.interpolated[i].attach(NewTexture(w, height, format, true));
             if (!slot.interpolated[i]) return false;
@@ -1434,12 +1782,12 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
         if (!real->full || (scale < 1 && !real->low)) return false;
     }
     if (!CmdOpen()) return false;
-    for (unsigned i = 0; i < g_fg_count; ++i)
+    for (unsigned i = 0; i < g_fg.room; ++i)
     {
         auto to_copy = Barrier(g_fg.output[i].get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
         lfCore.cmd->ResourceBarrier(1, &to_copy);
     }
-    for (auto &slot : g_fg.slots) for (unsigned i = 0; i < g_fg_count; ++i)
+    for (auto &slot : g_fg.slots) for (unsigned i = 0; i < g_fg.room; ++i)
     {
         auto to_copy = Barrier(slot.interpolated[i].get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
         lfCore.cmd->ResourceBarrier(1, &to_copy);
@@ -1560,7 +1908,7 @@ static void FgDump(ID3D12Resource *source, D3D12_RESOURCE_STATES state, unsigned
 // taken inside the pair's own command list, read back after it has run.
 static struct FgCost
 {
-    static constexpr UINT kMarks = 12;
+    static constexpr UINT kMarks = 24;
     ID3D12QueryHeap *heap = nullptr;
     ID3D12Resource *readback = nullptr;
     UINT64 rate = 0;
@@ -1681,10 +2029,42 @@ static void FgCostRead()
 
 // Adaptive MFG's frames a second: the target given, or (1) the screen's refresh - a little under it, as a limit at
 // the refresh is kept (no slack at all and every hiccup costs a frame). 0: off.
+// Round 85 (GitHub #73, "a multiplier of 2.5"): the game's own rate the decimal multiplier counts from - FgPresent's
+// evened-out pace, followed a tenth of the way a pair and only when it moved more than 1.5%: the target must not
+// wander with every frame of the game, or the beat itself would.
+static double g_ratio_rate = 0.0;
+// (Round 58, back in round 95: g_fixed_beat - with AdaptiveTarget's declaration, above: the presenter reads it too.)
+
+// Round 86: each new frame's light as a whole (the mean of the small luma, sm_loop.inl) and the one before's - SMFG
+// compares shapes rather than brightness where the whole picture got lighter or darker between a pair's two frames
+// (msm_fg.h, Apart; MsmAsk::light).
+static double g_light_now = 0.0, g_light_before = 0.0;
+static void LightSeen(const BYTE *view, UINT w, UINT h)
+{
+    double sum = 0.0;
+    size_t count = 0;
+    for (UINT y = 0; y < h; y += 2)
+    {
+        const BYTE *row = view + static_cast<size_t>(y) * w;
+        for (UINT x = 0; x < w; x += 2) { sum += row[x]; ++count; }
+    }
+    g_light_before = g_light_now;
+    g_light_now = count ? sum / count : 0.0;
+}
+static float LightChange() { return g_light_before > 2.0 && g_light_now > 0.0 ? static_cast<float>(g_light_now / g_light_before - 1.0) : 0.0f; }
 static double AdaptiveTarget()
 {
     const int want = smOpt.adaptive.load();
-    if (want <= 0) return 0.0;
+    if (want <= 0)
+    {
+        // The decimal multiplier: Adaptive MFG at the game's rate times it, never past the screen.
+        const int tenths = smOpt.ratio.load();
+        // (Round 95: a fixed multiplier's own even beat, when it has one - FgPresent sets it.)
+        if (tenths <= 10) return g_fixed_beat.load();
+        if (g_ratio_rate <= 0.0) return 0.0;
+        const double target = g_ratio_rate * tenths / 10.0, screen = OutputRefresh();
+        return screen >= 24.0 ? std::min(target, screen * 0.97) : target;
+    }
     const double refresh = OutputRefresh();
     if (want == 1) return refresh >= 24.0 ? refresh * 0.97 : 0.0;
     return double(want);
@@ -1703,16 +2083,59 @@ static void AdaptiveLay(AdaptivePlan &p, double every, double after)
     const double span = after > before ? after - before : every > 0.0 ? every : g_fg_clock.every;
     if (fps <= 0.0 || before <= 0.0 || span <= 0.0) { g_adaptive_next = 0.0; return; }
     const double beat = 1.0 / fps, end = before + span;
-    if (g_adaptive_next <= before - beat || g_adaptive_next > end + 4.0 * beat) g_adaptive_next = before + beat;
-    while (g_adaptive_next <= end + 1e-6 && p.n < 8)
+    // Round 95 - what rounds 59 to 81 had learnt about the beat and the return to 1.0.3 (round 83) left behind:
+    //  - did the pair before end on its real frame? Then this pair does not begin on it as well - with a game's frames
+    //    of uneven length the last beat of one pair and the first of the next took the same real frame: the picture
+    //    stood for a beat and leapt two. That beat gets a frame of its own (round 59).
+    //  - a pair with more beats than it has places for frames (a game's frame far longer than its average): the beat
+    //    goes by with nothing new rather than the real frame early - shown early it was the world a beat ahead and
+    //    then the same picture again (round 61).
+    // SM_BEAT_PLAIN=1: the plain beat of before (to compare).
+    static const bool plain = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_BEAT_PLAIN", v, sizeof(v)) > 0 && v[0] == '1'; }();
+    static bool ended_real = false;
+    if (g_adaptive_next <= before - beat || g_adaptive_next > end + 4.0 * beat) { g_adaptive_next = before + beat; ended_real = false; }
+    // (Round 81's "a fixed multiplier's real frame on the beat nearest it, half a beat either way" is NOT back: tried
+    // here first, the triangles of tests\smooth had 39.7% of the picture's steps a quarter of a beat off their moment
+    // at a steady 40 FPS x3, against 1.8% - a real frame shown up to half a beat from where it belongs is the world
+    // out of step, each pair another way. A beat within 0.08 of a pair of a real frame shows it; every other one a
+    // frame made for that very moment.)
+    // (A fixed multiplier at its limit's beat: within a fifth of a beat at most - at four beats a pair 0.08 of the pair
+    // is a third of a beat, and the triangles had those pictures a quarter of a beat off their moment.)
+    const bool own_beat = !plain && smOpt.adaptive.load() <= 0 && smOpt.ratio.load() <= 10;
+    const float near_real = own_beat ? std::min(kAdaptiveNear, static_cast<float>(0.2 * beat / span)) : kAdaptiveNear;
+    // (SMFG: the places it has - never more than the generator was made for: round 85, x2.5 asked as x3 laid a third
+    // frame on a generator of two and the card's list was refused, 0x80070057. DLSS MFG rebuilt: as many beats as the
+    // plan holds - each is rebuilt at its own moment from the frame of the generator's nearest it.)
+    const unsigned room = plain ? std::min(5u, g_fg_count) : MsmSelected() ? std::min(5u, std::max(1u, g_fg.room)) : kAdaptiveMost;
+    while (g_adaptive_next <= end + 1e-6 && p.n < kAdaptiveMost)
     {
         const float t = static_cast<float>((g_adaptive_next - before) / span);
         signed char what = -1;
-        if (t <= kAdaptiveNear) what = -2;
-        else if (t < 1.0f - kAdaptiveNear && p.made < 5) what = static_cast<signed char>(p.made++);
+        if (t <= near_real && !(!plain && ended_real && p.n == 0 && p.made < room)) what = -2;
+        else if (t < 1.0f - near_real && p.made < room) what = static_cast<signed char>(p.made++);
+        else if (!plain && t < 1.0f - near_real) { g_adaptive_next += beat; continue; }
         p.when[p.n] = g_adaptive_next; p.phase[p.n] = t; p.what[p.n] = what; ++p.n;
         g_adaptive_next += beat;
     }
+    ended_real = p.n > 0 && p.what[p.n - 1] == -1;
+}
+
+// Round 91 (tests\smooth): a pair's whole work on the card went in one piece - the motion search and every frame in
+// between, 2.4 ms with DLSS MFG, 3.3 with SMFG at 1440p - and the presenter's copy and Present, which come every
+// 8 ms at x3/40 FPS, waited behind it whenever their moment fell inside it: frames reached the screen 0 to 3 ms late,
+// steadily ordered in the Presents and not on the screen (SMFG 7%, DLSS 3.6% of the moments a quarter off their
+// beat, in the order of their pieces' length). In pieces - the search, then each frame in between - the card takes
+// the presenter's work up between two of them. SM_SPLIT=0 / 1: one piece / pieces (to compare).
+static bool FgSplitWanted()
+{
+    static const int wanted = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_SPLIT", v, sizeof(v)) ? v[0] - '0' : 0; }();
+    return wanted == 1;
+}
+static void FgSplit()
+{
+    if (!FgSplitWanted()) return;
+    CmdSubmit();
+    CmdOpen();
 }
 
 static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES state)
@@ -1753,7 +2176,10 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     // "Limit to refresh rate" off in the app: the multiplier's own count,
     // whatever the screen shows.
     // (Round 45: VRR no longer puts the screen's limit on the count by itself - "Limit to refresh rate" does: lf_vrr.inl, VrrCap.)
-    const bool to_screen = smOpt.screen_limit.load() != 0;
+    // (Round 88r, the owner: "Limit to refresh rate" is simply a Frame limit at the screen's refresh - 200 on a 200 Hz
+    // screen, as if set by hand: ShownCap, lf_settings.inl. Nothing of its own here any more - its 0.97 of the refresh
+    // and VRR's ceiling had it at 188, and round 88q's whole counts left x6 far under 200.)
+    const bool to_screen = false;
     const double refresh = OutputRefresh();
     double target = to_screen ? refresh : 0.0;
     // A little under the refresh rate: at exactly one frame a refresh there is
@@ -1784,6 +2210,80 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     }
     // Game FPS given in the app: the frames in between a pair are counted from it, not from the frames' times.
     if (interpolate && GivenFrameTime() > 0.0) every = GivenFrameTime();
+    // Round 58, back in round 95 (the owner: "Lossless Scaling makes the game itself smoother; I do not want all these
+    // oscillations in the frame time line"): a fixed multiplier at an even beat of its own (fixed_beat). Each pair had
+    // the multiplier's count laid evenly over its own length, so every change of the game's frame time was shown, times
+    // the multiplier - The Witcher 3, x3: the game's frames 15.6 to 19.2 ms, the Presents 5.30 to 6.31 ms and a step
+    // of 9% between neighbours at every tenth of them, where Lossless Scaling's were 3.91 to 4.25 with 2%
+    // (tests\smooth\flat.py). At a beat that follows only the game's average rate - the mean of its last fifteen
+    // frames as they came, so the beat moves a fifteenth of a frame's change each frame and never at once - each frame
+    // is made for its own moment as Adaptive MFG's are. Where frames in between can be made for any moment: SMFG, and
+    // DLSS MFG rebuilt at the picture's size.
+    // ONLY where the multiplier asks more than a limit lets through (Frame limit, Limit to refresh rate, VRR's): there
+    // the pairs took turns with 3 and 4 frames - x4 of 56 on a 200 Hz screen, gaps of 5.9 and 4.45 ms side by side,
+    // 11.6% of the frames on the screen a quarter off; on the limit's own beat 0.94%, with 0.25 long gaps a second
+    // for 1.44 and 15.7 ms behind the game for 23.2 (The Witcher 3, DLSS MFG). Under the limit a pair keeps the
+    // multiplier's count at its own even places, every real frame at its own moment: the beat run free there had a
+    // real frame only where a beat fell on one (see AdaptiveLay), and the frame clock made even is what keeps the
+    // line flat (lf_fg_pace.inl, Trust).
+    {
+        static double spans[15] = {};
+        static unsigned spans_filled = 0, spans_next = 0;
+        // (SMFG only. DLSS MFG rebuilt goes by the frame of its own nearest each beat, and what moves its own way - a
+        // character, a car, the triangles of tests\smooth - then stands at that frame's moment, not the beat's: at
+        // the limit's beat 21.7% of the picture's steps a quarter of a beat off, 3.9% with SMFG. Over a limit DLSS MFG
+        // and XeSS MFG get the largest whole count that fits instead - below, `whole_fit`.)
+        const bool any_moment = MsmSelected();
+        if (!EvenOn() || smOpt.adaptive.load() > 0 || smOpt.ratio.load() > 10 || !interpolate || every <= 0.0 || !any_moment || g_fg_count == 0)
+        {
+            spans_filled = spans_next = 0;
+            g_fixed_beat = 0.0;
+        }
+        else
+        {
+            // (A frame far from the pace - a stall, a load - is counted as the pace: one hitch does not move the beat.)
+            spans[spans_next] = std::clamp(interval, 0.6 * every, 1.7 * every);
+            spans_next = (spans_next + 1) % 15;
+            if (spans_filled < 15) ++spans_filled;
+            double sum = 0.0;
+            for (unsigned i = 0; i < spans_filled; ++i) sum += spans[i];
+            // (DLSS MFG on an RTX 20/30 places its frames by their moments up to x4 - round 92: x5 / x6 asked is x4's beat.)
+            unsigned shown = g_fg_count;
+            if (NgxSelected() && !g_xess_tensor && shown > 3) { const int sm = FgComputeCapability(); if (sm == 75 || sm == 86) shown = 3; }
+            const double asked = double(shown + 1) * spans_filled / sum;
+            double most = 0.0;
+            for (const int limit : { ShownCap(), PresentCap() })
+                if (limit > 0) most = most > 0.0 ? std::min(most, double(limit)) : double(limit);
+            // (Over the limit, and back under it only when 4% under: a game at the edge does not go from one way of
+            // showing its frames to the other pair by pair.)
+            static bool over = false;
+            over = most > 0.0 && spans_filled >= 8 && asked > most * (over ? 0.96 : 1.0);
+            static bool was_over = false;     // (1.1.0: not g_fixed_beat - a fit beat sets it under the limit too)
+            if (over != was_over)
+                Trace(over ? "[beat] x%u of the game's %.1f frames a second is more than the %.0f a second allowed: shown at that beat, each frame made for its own moment"
+                           : "[beat] x%u of the game's %.1f frames a second fits under the limit again: the multiplier's count in each pair",
+                      shown + 1, spans_filled / sum, most);
+            was_over = over;
+            // (1.1.0: on a screen at its fixed refresh, a whole number of refreshes - FitBeat, lf_vrr.inl.)
+            double fit = FitActive() && spans_filled >= 8 ? FitBeat(over ? most : asked) : 0.0;
+            static bool fitting = false;
+            if ((fit > 0.0) != fitting)
+            {
+                fitting = fit > 0.0;
+                if (fitting) Trace("[beat] the screen stays at its fixed %.0f Hz: x%u of the game's %.1f frames a second shown at %.1f a second - every frame %.0f refreshes",
+                                   OutputRefresh(), shown + 1, spans_filled / sum, fit, OutputRefresh() / fit);
+                else Trace("[beat] the multiplier's own beat again (the screen follows the frames, or the fit is off)");
+            }
+            g_fixed_beat = fit > 0.0 ? fit : over ? most : 0.0;
+        }
+    }
+    // (The decimal multiplier's rate, AdaptiveTarget.)
+    if (interpolate && every > 0.0)
+    {
+        const double rate = 1.0 / every;
+        if (g_ratio_rate <= 0.0) g_ratio_rate = rate;
+        else if (std::fabs(rate - g_ratio_rate) > 0.015 * g_ratio_rate) g_ratio_rate += 0.1 * (rate - g_ratio_rate);
+    }
     unsigned count = g_fg_count;
     bool rest_now = false;
     double room = 0.0;
@@ -1808,7 +2308,37 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
         other_mind = would_rest != resting ? other_mind + 1 : 0;
         rest_now = other_mind >= 24 ? would_rest : resting;
         if (rest_now != resting) other_mind = 0;
-        if (capped)
+        // Round 95, "Even pacing" (fixed_beat) with a generator that makes its frames at a pair's even places only
+        // (DLSS MFG, XeSS MFG), a fixed multiplier and a limit it does not fit under: the largest whole count that
+        // does, the same for every pair - x4 of 56 on a 200 Hz screen is x3, 168 frames a second 5.9 ms apart, each
+        // at its own moment. Filled exactly (below) the pairs took turns with 3 and 4: 200 a second, 5.9 and 4.45 ms
+        // apart side by side - the owner's "all these oscillations". It goes up when one more has fitted for twenty
+        // pairs, down when it has not for eight.
+        const bool whole_fit = capped && EvenOn() && !MsmSelected() && smOpt.adaptive.load() <= 0 && smOpt.ratio.load() <= 10 &&
+                               room < double(g_fg_count + 1) + 0.06;
+        static unsigned fitted = 0;
+        static int fit_more = 0, fit_fewer = 0;
+        if (!whole_fit) { fitted = 0; fit_more = fit_fewer = 0; }
+        if (whole_fit)
+        {
+            auto fit = [](double frames) { return static_cast<unsigned>(std::clamp(static_cast<int>(std::floor(frames)) - 1, 0, static_cast<int>(g_fg_count))); };
+            // (Round 96: a count stays until it is 3% over the limit, and one more is taken only when it has fitted
+            // for forty pairs - The Witcher 3 between 64 and 71 FPS on a 200 Hz screen stood at x3's edge, 66.7, and
+            // went from x3 to x2 and back: 190 frames a second, then 142.)
+            // (One more frame a pair makes the game itself slower - The Witcher 3 at 1440p: 68.6 FPS under x2, 61.5 under
+            // x3 - so there is more room after the step up than before it: counted in at 7%, less than it is. Without
+            // it a session that began at x2 stayed there, 137 frames a second, where x3 at 186 fits.)
+            const unsigned up = fit(room * 1.07 - 0.03), down = fit(room + 0.09);
+            if (fitted == 0 || fitted > g_fg_count) { fitted = std::max(1u, fit(room + 0.09)); fit_more = fit_fewer = 0; }
+            fit_more = up > fitted ? fit_more + 1 : 0;
+            fit_fewer = down < fitted ? fit_fewer + 1 : 0;
+            if (fit_more >= 40) { fitted = up; fit_more = fit_fewer = 0; ++g_steady.changes; }
+            else if (fit_fewer >= 8) { fitted = std::max(1u, down); fit_more = fit_fewer = 0; ++g_steady.changes; }
+            count = fitted;
+            g_fg.extra_budget = 0;
+            held = 0;
+        }
+        else if (capped)
         {
             g_fg.extra_budget += std::clamp(room - 1.0, 0.0, double(g_fg_count));
             count = std::min(g_fg_count, static_cast<unsigned>(g_fg.extra_budget + 0.0001));
@@ -1895,7 +2425,8 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
         const bool chained = source > 0 && source_before > 0 && source > source_before;
         const double after = probe.Moment(source > 0 ? source : taken, chained ? source - source_before : 0.0, OutputRefresh());
         AdaptiveLay(plan, every, after);
-        count = plan.made;
+        // (DLSS MFG rebuilt: its beats may be more than the frames it makes - each goes by the nearest of them.)
+        count = MsmSelected() ? plan.made : std::min(plan.made, g_fg_count);
     }
     else g_adaptive_next = 0.0;
     ++g_steady.pairs;
@@ -1913,8 +2444,46 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     // without its unlock plugin (xe_mfg.inl). Where frames in between are
     // rebuilt the others go by those, as x5 and x6 do with DLSS MFG; where
     // they are shown as the library made them, a pair has no more than that.
-    if (XeSelected() && !rebuilt) count = std::min(count, XeMost());
-    const unsigned made = XeSelected() ? std::min(FgMadeCount(count, rebuilt), XeMost()) : FgMadeCount(count, rebuilt);
+    // (Round 92: rebuilt too - Intel's library makes three a pair at most, and x5 / x6 shown from three landed at 1/4,
+    // 1/2, 3/4 in five places, 91% of the moments a quarter off: x4's own frames at their own moments are smoother than
+    // x6 made of them. With SM_FG_EVERY=0, as before.)
+    static const bool xe_two = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_FG_EVERY", v, sizeof(v)) > 0 && v[0] == '0'; }();
+    // (Round 92: DLSS MFG through the RTX 20/30 compatibility package places its frames by their moments up to x4 -
+    // 0.25 / 0.50 / 0.73 after the rebuild - and not past it: x5 at 0.21 / 0.34 / 0.52 / 0.59 / 0.75 where 0.2 / 0.4 /
+    // 0.6 / 0.8 were asked, x6 likewise, every made frame or two - motion 28 - 36% a quarter off against x4's 3.6%.
+    // There x5 / x6 asked is shown as x4. RTX 40 / 50 (their own route, not measured here) keep what was asked.
+    // SM_DLSS_ABOVE_X4=1: as asked on every card, to compare.)
+    // Round 98 (the owner, trying r97: "x6 does not work with XeSS MFG and DLSS MFG"): x5 and x6 are back, shown as asked.
+    //  - DLSS MFG: every frame made, as round 92 first had it (moments a quarter off 38% on the triangles at x6
+    //    where x4 has 3.6% - what moves its own way is not where its moment says; the picture as a whole, rebuilt
+    //    from the two real frames, is). SM_DLSS_X4_CAP=1: shown as x4, as rounds 92 to 97 did.
+    //  - XeSS MFG, Intel's library (three a pair at most) and the tensor cores' (the package refuses more): where
+    //    the frames are rebuilt at the picture's size, each of the five is rebuilt at its own moment and goes by
+    //    the nearest of the three made for what moves its own way; shown as made (Flow 100) a pair has three.
+    static const bool dlss_above = [] { char v[4] = {}; return !(GetEnvironmentVariableA("SM_DLSS_X4_CAP", v, sizeof(v)) > 0 && v[0] == '1'); }();
+    if (NgxSelected() && !g_xess_tensor && !dlss_above && count > 3)
+    {
+        const int sm = FgComputeCapability();
+        if (sm == 75 || sm == 86)
+        {
+            static bool said = false;
+            if (!said) { said = true; Trace("[dlssg] DLSS MFG on this RTX %s card places its frames by their moments up to x4: x%u asked is shown as x4, each frame at its own moment",
+                                            sm == 75 ? "20" : "30", count + 1); }
+            count = 3;
+            // (What the app is told - not under Adaptive MFG, whose beats lay the frames: AdaptiveLay, below.)
+            g_fg_shown_most = smOpt.adaptive.load() > 0 || smOpt.ratio.load() > 10 ? 0u : 3u;
+        }
+    }
+    if (XeSelected() && !rebuilt && count > XeMost() && XeMost() > 0)
+    {
+        static bool said = false;
+        if (!said) { said = true; Trace("[xess] Intel's library makes %u frames in between a pair at most: x%u asked is shown as x%u, each frame at its own moment", XeMost(), count + 1, XeMost() + 1); }
+        count = XeMost();
+        g_fg_shown_most = AdaptiveTarget() > 0.0 ? 0u : XeMost();
+    }
+    // (The tensor cores' XeSS-FG: three made at most; shown as made, three shown.)
+    if (FgXessTensor() && !rebuilt && count > 3) { count = 3; g_fg_shown_most = AdaptiveTarget() > 0.0 ? 0u : 3u; }
+    const unsigned made = XeSelected() ? std::min(FgMadeCount(count, rebuilt), XeMost()) : FgXessTensor() ? std::min(FgMadeCount(count, rebuilt), 3u) : FgMadeCount(count, rebuilt);
     // (MSM FG has no history to keep going: a pair without frames in between asks it for none.)
     unsigned evaluated = idle ? 0u : MsmSelected() ? made : std::max(1u, made);
     // (XeSS MFG: more than the pair wants, where asking for fewer would halt the library - XeCount says why.
@@ -2008,8 +2577,28 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     // (XeMake, below) - the library makes them in a swap chain of its own.
     // (With it goes how the picture moved since the frame before - the library asks to be told - unless the
     // engine's own motion field was picked in the app: then that is handed over.)
-    ID3D12Resource *const xe_motion = MotionGiven() ? ep.pMVecs : nullptr;
-    if (XeSelected() && evaluated) XeFeed(lfCore.cmd, model_color, model_state, MotionGiven() || restart ? nullptr : g_fg_prior.moved);
+    // Round 101, the owner: "Triangle Mesh" for DLSS MFG and XeSS MFG too - the motion read by the triangles' search
+    // (msm_tri.h, TriMotion: the mesh's corners, 3DRS) and handed to the generator as its motion picture, in place of
+    // the picture of noughts it is given when the motion is left to it. Not where the engine's own field was picked
+    // (MotionGiven), and not across a cut or a rest: there is no pair then.
+    ID3D12Resource *tri_motion = nullptr;
+    if (!MsmSelected() && !MotionGiven() && smOpt.msm_tri.load() != 0 && evaluated && before && !restart)
+    {
+        const int pitch = smOpt.tri_pitch.load(), rounds = smOpt.tri_rounds.load(), fine = smOpt.tri_fine.load(), full = smOpt.tri_full.load(), top = smOpt.tri_top.load();
+        if (pitch > 0 && static_cast<UINT>(pitch) != g_tri.pitch) { g_tri.pitch = static_cast<UINT>(pitch); TriClose(); MsmForget(); }
+        if (rounds > 0) g_tri.rounds = static_cast<float>(rounds);
+        if (fine >= 0) g_tri.fine_rounds = fine;
+        if (full >= 0) g_tri.full_rounds = full;
+        if (top > 0) g_tri.top = top;
+        if (smOpt.tri_exact.load() >= 0) g_tri.exact_rounds = smOpt.tri_exact.load();
+        if (smOpt.tri_relax.load() >= 0) g_tri.relax_rounds = smOpt.tri_relax.load();
+        tri_motion = TriMotion(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, g_fg.full_w, g_fg.full_h, g_fg.format,
+                               FlowShare(), v.work_w, v.work_h);
+        if (tri_motion) { ep.pMVecs = tri_motion; FgCostMark(lfCore.cmd, "tri motion"); }
+    }
+    else if (!MsmSelected() && g_msm.full_w) MsmForget();       // (the next pair of theirs starts anew)
+    ID3D12Resource *const xe_motion = MotionGiven() ? ep.pMVecs : tri_motion;
+    if (XeSelected() && evaluated) XeFeed(lfCore.cmd, model_color, model_state, MotionGiven() || tri_motion || restart ? nullptr : g_fg_prior.moved);
     // MSM FG: the pair's own work once, then each frame in between at its moment - from the two real frames,
     // into the pictures DLSS MFG's frames go into. Without a frame before (a cut, a rest) there is no pair, and
     // the next one starts anew.
@@ -2023,6 +2612,7 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
             MsmAsk ask;
             ask.marks = smOpt.still.load() != 0;
             ask.fast = smOpt.msm_search.load() != 0;
+            ask.light = LightChange();
             float across = 0.0f, down = 0.0f;
             if (LearnExpect(across, down)) { ask.expected_x = across * static_cast<float>(g_fg.full_w); ask.expected_y = down * static_cast<float>(g_fg.full_w); }
             // (Round 53: else the engine's own wide look for where the picture as a whole went - a fast turn, sm_guard.inl.)
@@ -2033,23 +2623,90 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
                 int cells_w = 0, cells_h = 0;
                 if (LearnHudTake(cells, cells_w, cells_h)) MsmHud(cells, cells_w, cells_h);
             }
-            // Round 52, SMFG AI (msm_ai.h): the network makes them, on the card's AI units - SMFG 1.1 when it cannot.
+            // Round 52, SMFG AI (msm_ai.h): the network makes them, on the card's AI units - SMFG when it cannot.
+            // Round 88c, SMAI (the owner, after trying round 88's "SMFG Net only helps SMFG": slower, and no better - a
+            // generator of its own instead, picked in the app beside SMFG, DLSS MFG and XeSS MFG): msm_ai 1 is SMAI -
+            // SMFG Net makes the frames, as in round 87. The helper stays for tests only: SM_AI_HELP=1 (its motion offered
+            // to SMFG's blocks, msmai::Words, MsmAsk::net).
             bool made = false;
-            if (smOpt.msm_ai.load() && !msmai::Failed())
+            const int ai_mode = smOpt.msm_ai.load();
+            // Round 99, the owner's triangles (msm_tri.h, "Triangle Mesh" in the app): SMFG's pair and frames made by a mesh of
+            // triangles instead - not while a network makes them (SMAI).
+            {
+                const bool tri = smOpt.msm_tri.load() != 0 && ai_mode == 0;
+                if (tri != (g_msm.tune.tri > 0.0f)) { g_msm.tune.tri = tri ? 1.0f : 0.0f; MsmForget(); }
+                if (tri)
+                {
+                    // (Its own numbers, where the app gave any: a mesh of another size is made anew.)
+                    const int pitch = smOpt.tri_pitch.load(), rounds = smOpt.tri_rounds.load(), fine = smOpt.tri_fine.load(), full = smOpt.tri_full.load(),
+                              home = smOpt.tri_home.load(), top = smOpt.tri_top.load();
+                    if (pitch > 0 && static_cast<UINT>(pitch) != g_tri.pitch) { g_tri.pitch = static_cast<UINT>(pitch); TriClose(); MsmForget(); }
+                    if (rounds > 0) g_tri.rounds = static_cast<float>(rounds);
+                    if (fine >= 0) g_tri.fine_rounds = fine;
+                    if (full >= 0) g_tri.full_rounds = full;
+                    if (home >= 0) g_tri.home = static_cast<float>(home);
+                    if (top > 0) g_tri.top = top;
+                    if (smOpt.tri_exact.load() >= 0) g_tri.exact_rounds = smOpt.tri_exact.load();
+                    if (smOpt.tri_relax.load() >= 0) g_tri.relax_rounds = smOpt.tri_relax.load();
+                }
+                if (tri && !TriOn()) TriReady(g_fg.full_w, g_fg.full_h, g_fg.format);
+            }
+            static const bool ai_helps = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_AI_HELP", v, sizeof(v)) && v[0] == '1'; }();
+            // (Round 88b, the helper: SMFG's own search goes to the card with the network's input, before the network -
+            // the card works on it while this thread hands the network its work; the rest of SMFG's pair after it.)
+            bool searched = false;
+            if (ai_mode == 1 && ai_helps && !msmai::Failed())
+            {
+                UINT search_w = 0, search_h = 0, blocks_w = 0, blocks_h = 0;
+                ID3D12Resource *const words = MsmNetWords(search_w, search_h, blocks_w, blocks_h);
+                ID3D12GraphicsCommandList *list = lfCore.cmd;
+                ask.net = msmai::Words(list, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, words, search_w, search_h,
+                                       blocks_w, blocks_h, g_fg.full_w, g_fg.full_h, g_fg.format,
+                                       [] { return CmdSubmit() != 0; }, [] { return CmdOpen(); },
+                                       [&] {
+                                           MsmPairSearch(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, ask);
+                                           FgCostMark(lfCore.cmd, "msm search");
+                                       }, searched);
+                if (ask.net) FgCostMark(lfCore.cmd, "ai");
+                else msmai::Forget();
+            }
+            else if (ai_mode && !msmai::Failed())
             {
                 ID3D12Resource *outputs[msmai::kMost] = {};
                 for (unsigned index = 0; index < evaluated && index < msmai::kMost; ++index) outputs[index] = g_fg.output[index].get();
+                // (Round 87: each at its moment - Adaptive MFG's beat - as SMFG 1.1 below; SMFG Net draws at any.)
+                float moments[msmai::kMost] = {};
+                for (unsigned index = 0; index < msmai::kMost; ++index)
+                {
+                    moments[index] = static_cast<float>(index + 1) / static_cast<float>(evaluated + 1);
+                    for (unsigned b = 0; b < plan.n; ++b) if (plan.what[b] == static_cast<signed char>(index)) moments[index] = plan.phase[b];
+                }
                 ID3D12GraphicsCommandList *list = lfCore.cmd;
+                // (Round 88d, SMAI 1.0: SMFG's marks - read-outs and what stays on the screen held where they are - when
+                // "Keep still pixels" is on, found from the network's own motion: msmai::MarksAsk, MsmMarksFromWords.)
+                msmai::MarksAsk marks_ask;
+                const bool with_marks = ai_mode == 1 && ask.marks;
+                if (with_marks)
+                {
+                    marks_ask.words = MsmNetWords(marks_ask.search_w, marks_ask.search_h, marks_ask.blocks_w, marks_ask.blocks_h);
+                    marks_ask.holds = MsmMarkHolds();
+                    marks_ask.make = [&](ID3D12GraphicsCommandList *l) {
+                        return MsmMarksFromWords(l, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, ask);
+                    };
+                }
+                FgClearOfPresent();
                 made = msmai::Frames(list, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, outputs,
                                      D3D12_RESOURCE_STATE_COPY_SOURCE, std::min(evaluated, msmai::kMost), g_fg.full_w, g_fg.full_h, g_fg.format,
-                                     [] { return CmdSubmit() != 0; }, [] { return CmdOpen(); });
+                                     [] { return CmdSubmit() != 0; }, [] { return CmdOpen(); }, moments, with_marks ? &marks_ask : nullptr);
                 if (made) { MsmForget(); FgCostMark(lfCore.cmd, "ai"); }
             }
             if (!made)
             {
-                msmai::Forget();
-                MsmPair(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, ask);
+                if (!ask.net) msmai::Forget();
+                if (searched) MsmPairFinish(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, ask);
+                else { g_msm_mark = FgCostDiag() ? &FgCostMark : nullptr; MsmPair(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, ask); }
                 FgCostMark(lfCore.cmd, "msm pair");
+                FgSplit();
                 for (unsigned index = 0; index < evaluated; ++index)
                 {
                     // (Adaptive MFG: at the moment of its beat.)
@@ -2058,6 +2715,7 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
                     MsmFrame(lfCore.cmd, before->full.get(), real->full.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, g_fg.output[index].get(),
                              D3D12_RESOURCE_STATE_COPY_SOURCE, moment);
                     FgCostMark(lfCore.cmd, index == 0 ? "eval1" : index == 1 ? "eval2" : "eval+");
+                    if (index + 1 < evaluated) FgSplit();
                 }
             }
         }
@@ -2083,6 +2741,7 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
         auto post = Barrier(model_color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, model_state);
         if (model_state != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) lfCore.cmd->ResourceBarrier(1, &post);
         FgCostMark(lfCore.cmd, index == 0 ? "eval1" : index == 1 ? "eval2" : "eval+");
+        if (!NVSDK_NGX_FAILED(result) && index + 1 < evaluated) FgSplit();
         if (NVSDK_NGX_FAILED(result))
         {
             FgAwait(lfCore.timeline, CmdSubmit(), 30000);
@@ -2130,6 +2789,10 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     // (XeSS MFG: the frames stay where the library draws them - XeMake says in which pictures, below.)
     for (unsigned i = 0; i < evaluated && !XeSelected(); ++i)
         std::swap(g_fg.output[i], slot->interpolated[i]);
+    // Round 90, SMHUD (sm_hud.h, "hud_ai" - every generator): where the game's HUD is in this pair, into the slot's
+    // own map, for each of its frames in between to show it as the real frame has it.
+    slot->hud_on = interpolate && before && smhud::Pair(before->full.get(), real->full.get(), g_fg.full_w, g_fg.full_h, g_fg.format, slot->hud);
+    if (slot->hud_on) FgCostMark(lfCore.cmd, "hud");
     // Which tiles are at rest between the real frame before and this one, at
     // the size frames in between are made at, into the slot's own map.
     // (MSM FG: not asked - a pixel the two real frames have alike it leaves as it is by itself, msm_fg.h.)
@@ -2146,6 +2809,7 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     FgCostMark(lfCore.cmd, "copy+tiles");
     FgCostResolve(lfCore.cmd);
     const double wait_from = LatencyNow();
+    if (!(MsmSelected() && smOpt.msm_ai.load())) FgClearOfPresent();     // (SMAI: held before its network went, above)
     const UINT64 fg_fence = CmdSubmit();
     // XeSS MFG: now the library is asked - the frame is on its way into its
     // back buffer - and says which of its pictures the pair's frames in
@@ -2187,6 +2851,14 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
         const double raw = source > 0 ? source : taken;
         const bool chained = interpolate && source > 0 && source_before > 0 && source > source_before;
         slot->moment = g_fg_clock.Moment(raw, chained ? source - source_before : 0.0, OutputRefresh());
+        // SM_STAMPS=1 (tests, round 93): every frame's stamp as the capture gave it, against the clock's moment for it.
+        {
+            static const bool stamps = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_STAMPS", v, sizeof(v)) > 0 && v[0] == '1'; }();
+            if (stamps) Trace("[stamp-at] %.6f %.6f", raw, taken);
+            if (stamps) Trace("[stamp] span %.2f ms, taken %.2f ms after the stamp, the clock's moment %.2f ms after it, pace %.2f ms; one span off by %.2f ms, eight together by %.2f",
+                              chained ? (source - source_before) * 1000.0 : 0.0, (taken - raw) * 1000.0, (slot->moment - raw) * 1000.0, g_fg_clock.every * 1000.0,
+                              std::sqrt(g_fg_clock.tr_one) * 1000.0, std::sqrt(g_fg_clock.tr_eight) * 1000.0);
+        }
         slot->prev_moment = chained && g_fg_clock.before > 0.0 ? g_fg_clock.before : slot->moment - interval;
         slot->interpolate = interpolate;
         slot->ad_on = by_beat && g_adaptive_next > 0.0;
@@ -2257,6 +2929,8 @@ static void FgConfigure(unsigned count)
     CloseFgResources();
     g_fg_requested_count = count;
     g_fg_count = std::min(count, g_fg_runtime_max);
+    // (XeSS-FG on the tensor cores makes three frames a pair at most - the package refuses more: FgPresent keeps what
+    // is MADE to three; round 98: what is shown is what was asked, where the frames are rebuilt.)
     g_fg.failed = false;
     lfOut.force_next = true;
     lfShow.stale = true;

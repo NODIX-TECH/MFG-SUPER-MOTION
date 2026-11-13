@@ -239,6 +239,7 @@ static bool ShowStart(UINT width, UINT height, uint32_t flags)
 
     // Round 51: the graphics driver told the output window is the one in front (sm_front.inl - VRR).
     front::Hook(lfShow.hwnd);
+    nooverlay::Tell();
     Trace("[screen] output window %ux%u up (flip discard, clicks pass through%s)",
         lfShow.bw, lfShow.bh, lfShow.capturable ? ", visible to capture" : ", hidden from capture");
     if (lfShow.upscaling)
@@ -508,6 +509,8 @@ static bool ShowPassThrough(Pipeline &pipe)
     if (!ShowRebuildIfStale()) return false;
     if (lfHdr.keep) return ShowHdr(pipe);
     if (HdrSwitchOn() && !ShowFormatReady(false)) return false;
+    // (Round 86: Bloom on the real frame, before any generator or the screen reads it - lf_bloom.inl.)
+    BloomApply(lfCore.cmd, pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (FgRequested() && FgPresent(pipe, pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)) return true;
 
     g_up.in_real = false;       // no frame generation: "Upscaling" sharpens on the way to the screen (ShowBlit)
@@ -603,16 +606,122 @@ static float WindowCoverage(const RECT &target)
     return static_cast<float>(static_cast<double>(covered) / static_cast<double>(area));
 }
 
+// Round 85 (GitHub #64, "it must pause when the game loses focus, as Lossless Scaling does"): is the captured
+// window's program the one in front - or nothing is, for the moment between two. Only DXGI's capture asked it
+// before; with Windows' capture of the window the output stayed on top of the program clicked to, while it covered
+// less than a quarter of the game. (Multi-display mode, round 43: another program in front - on another screen -
+// leaves the picture up.)
+//
+// Round 89 (since 1.0.3 the output went away a few seconds after the game came back, for minutes, on a laptop with
+// Assassin's Creed Odyssey - 1.0.2, without this test, worked): the window Windows calls "in front" is not always one
+// a person looks at. A program's hidden, cloaked, off-screen, tiny or click-through window - a launcher's helper, an
+// overlay, a laptop maker's tool - can hold the focus while the game is all one sees. Those count as the game in
+// front; so does a window of a program the game started. Which program it was is written in the log.
+static void FrontProgram(DWORD pid, char *out, size_t size)
+{
+    out[0] = 0;
+    const HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (handle == nullptr) { snprintf(out, size, "process %lu", pid); return; }
+    wchar_t path[MAX_PATH] = {};
+    DWORD length = MAX_PATH;
+    if (QueryFullProcessImageNameW(handle, 0, path, &length))
+    {
+        const wchar_t *name = wcsrchr(path, L'\\');
+        WideCharToMultiByte(CP_UTF8, 0, name ? name + 1 : path, -1, out, static_cast<int>(size), nullptr, nullptr);
+    }
+    else
+        snprintf(out, size, "process %lu", pid);
+    CloseHandle(handle);
+}
+
+static DWORD ParentProcess(DWORD pid)
+{
+    DWORD parent = 0;
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    for (BOOL ok = Process32FirstW(snap, &entry); ok; ok = Process32NextW(snap, &entry))
+        if (entry.th32ProcessID == pid) { parent = entry.th32ParentProcessID; break; }
+    CloseHandle(snap);
+    return parent;
+}
+
+// Why another program's window in front is no window a person looks at - or nullptr when it is one.
+static const char *FrontNotSeen(HWND front, DWORD pid, DWORD game)
+{
+    if (!IsWindowVisible(front)) return "not visible";
+    if (IsIconic(front)) return "minimised";
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(front, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return "cloaked";
+    const LONG_PTR ex = GetWindowLongPtrW(front, GWL_EXSTYLE);
+    if ((ex & WS_EX_TRANSPARENT) != 0 && (ex & WS_EX_LAYERED) != 0) return "click-through";
+    if ((ex & WS_EX_NOACTIVATE) != 0) return "never takes the focus";
+    if ((ex & WS_EX_LAYERED) != 0)
+    {
+        BYTE alpha = 255;
+        DWORD flags = 0;
+        if (GetLayeredWindowAttributes(front, nullptr, &alpha, &flags) && (flags & LWA_ALPHA) != 0 && alpha == 0)
+            return "fully transparent";
+        if ((ex & WS_EX_TOPMOST) != 0 && (ex & WS_EX_TOOLWINDOW) != 0) return "a floating overlay";
+    }
+    RECT r = {};
+    if (FAILED(DwmGetWindowAttribute(front, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))) && !GetWindowRect(front, &r))
+        return "no place";
+    if (r.right - r.left < 64 || r.bottom - r.top < 64) return "tiny";
+    if (MonitorFromRect(&r, MONITOR_DEFAULTTONULL) == nullptr) return "off every screen";
+    if (ParentProcess(pid) == game) return "a program the game started";
+    return nullptr;
+}
+
+static char g_front_said[200] = {};
+
+// The game's program has the focus (or a window of it no one looks at, or the engine's own) - multi-display or not.
+static bool FrontIsGame()
+{
+    const HWND front = GetForegroundWindow();
+    if (front == nullptr || front == lfShow.hwnd) return true;
+    DWORD source = 0, pid = 0;
+    GetWindowThreadProcessId(lfCap.window, &source);
+    GetWindowThreadProcessId(front, &pid);
+    if (source == pid || pid == GetCurrentProcessId()) return true;
+    // (Asked several times a frame: the answer for the same window is kept a quarter of a second.)
+    static HWND last = nullptr;
+    static ULONGLONG last_at = 0;
+    static bool last_answer = true;
+    static HWND said_for = nullptr;
+    const ULONGLONG now = GetTickCount64();
+    if (front == last && now - last_at < 250) return last_answer;
+    const char *why = FrontNotSeen(front, pid, source);
+    last = front; last_at = now; last_answer = why != nullptr;
+    char program[MAX_PATH] = {};
+    wchar_t kind[64] = {};
+    char kind8[96] = {};
+    if (front != said_for)
+    {
+        FrontProgram(pid, program, sizeof(program));
+        GetClassNameW(front, kind, 64);
+        WideCharToMultiByte(CP_UTF8, 0, kind, -1, kind8, sizeof(kind8), nullptr, nullptr);
+        snprintf(g_front_said, sizeof(g_front_said), "%s (%s)", program, kind8);
+        if (why != nullptr)
+            Trace("[window] %s has the focus, but its window is %s - the game counts as in front", g_front_said, why);
+        said_for = front;
+    }
+    return last_answer;
+}
+
+static bool GameInFront()
+{
+    return smOpt.multi_display.load() || FrontIsGame();
+}
+
+// The output hidden because another program is in front (WindowTrack): nothing is made meanwhile (FrameStep).
+static std::atomic<bool> g_game_away{false};
+
 // Is the captured window visible enough to draw over.
 static bool WindowInView(const RECT &target)
 {
-    // (Multi-display mode, round 43: another program in front - on another screen - leaves the picture up.)
-    if (lfCap.window_dxgi && !smOpt.multi_display.load()) {
-        DWORD source = 0, front = 0;
-        GetWindowThreadProcessId(lfCap.window, &source);
-        GetWindowThreadProcessId(GetForegroundWindow(), &front);
-        if (source != front) return false;
-    }
+    if (!GameInFront()) return false;
     return !IsIconic(lfCap.window) && WindowCoverage(target) < 0.25f;
 }
 
@@ -644,12 +753,24 @@ static void WindowTrack()
         {
             ShowWindow(lfShow.hwnd, SW_HIDE);
             lfShow.visible = false;
-            Trace(IsIconic(lfCap.window) ? "[window] the window is minimised - output hidden"
-                  : lfShow.upscaling ? "[window] the game is not in front - the scaled picture is hidden"
-                                     : "[window] something covers the window - output hidden");
+            const bool away = !lfShow.upscaling && !IsIconic(lfCap.window) && !GameInFront();
+            if (away)
+                Trace("[window] another program is in front (%s) - output hidden, nothing made until the game is again",
+                      g_front_said);
+            else
+                Trace(IsIconic(lfCap.window) ? "[window] the window is minimised - output hidden"
+                      : lfShow.upscaling ? "[window] the game is not in front - the scaled picture is hidden"
+                                         : "[window] something covers the window - output hidden");
+            if (away)
+            {
+                // Shown again with the game's next frame, not the last one from before (ShowRevealOnce).
+                g_game_away = true;
+                lfShow.revealed = false;
+            }
         }
         return;
     }
+    if (g_game_away.exchange(false)) Trace("[window] the game is in front again - frames are made again");
     if (!lfShow.visible && lfShow.revealed)
     {
         ShowWindow(lfShow.hwnd, SW_SHOWNOACTIVATE);

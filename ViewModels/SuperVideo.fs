@@ -22,7 +22,7 @@ type VideoItem(path: string) =
     inherit ViewModelBase()
     let mutable frames = 1          // index: Off, x2 .. x6
     let mutable size = 0            // index: the video's own, 720p .. 4K
-    let mutable upscaler = 0        // index into SuperVideoModel.upscalerKinds
+    let mutable upscaler = 0        // index into SuperVideoModel.upscalerKinds (0: Lanczos, as always; SMSR 1.0 under it - round 88p)
     let mutable codec = 0
     let mutable technique = 0       // SMFG, SMFG fast
     let mutable status = ""
@@ -55,14 +55,22 @@ type VideoItem(path: string) =
 type SuperVideoModel(text: unit -> UiText, post: (unit -> unit) -> unit, liveActive: unit -> bool) as this =
     inherit ViewModelBase()
     static let heights = [| 0; 720; 1080; 1440; 2160 |]
-    static let upscalerKinds = [| 0; 1; 4; 2; 3 |]
+    static let upscalerKinds = [| 0; 5; 1; 4; 2; 3 |]   // (round 88k: 5, SMSR 1.0 - Windows and Linux; second, under Lanczos, round 88p)
     static let videoTypes = set [ ".mp4"; ".mkv"; ".mov"; ".avi"; ".wmv"; ".webm"; ".m4v"; ".ts"; ".mts"; ".m2ts"; ".flv" ]
     let items = ObservableCollection<VideoItem>()
     let frames = [| for _ in 1 .. 6 -> VideoChoice("") |]
     let sizes = [| for _ in heights -> VideoChoice("") |]
-    let upscalers = [| VideoChoice("Lanczos"); VideoChoice(""); VideoChoice("Anime4K"); VideoChoice("Integer"); VideoChoice("Nearest Neighbor") |]
+    let upscalers = [| VideoChoice("Lanczos"); VideoChoice("SMSR 1.0"); VideoChoice(""); VideoChoice("Anime4K"); VideoChoice("Integer"); VideoChoice("Nearest Neighbor") |]
     let codecs = [| VideoChoice("H.264"); VideoChoice("HEVC (H.265)") |]
-    let techniques = [| VideoChoice("SMFG"); VideoChoice(""); VideoChoice("SMFG AI") |]
+    // (Linux, round 74: SMFG AI too - the same network through ncnn, beside the video program in layer/ai - when it
+    // came with the app.)
+    let techniques =
+        let aiThere = System.IO.File.Exists(System.IO.Path.Combine(AppContext.BaseDirectory, "layer", "ai", "smfg_ai.ncnn.param"))
+        if OperatingSystem.IsLinux() && not aiThere then [| VideoChoice("SMFG"); VideoChoice("") |]
+        // (Round 88e: "SMAI" on Windows - SMFG Net, SMAI's own network; on Linux the video program's network is still
+        // RIFE through ncnn: "SMFG AI", as before.)
+        elif OperatingSystem.IsLinux() then [| VideoChoice("SMFG"); VideoChoice(""); VideoChoice("SMFG AI") |]
+        else [| VideoChoice("SMFG"); VideoChoice(""); VideoChoice("SMAI") |]
     let mutable folder = ""
     let mutable running: VideoRun option = None
     let mutable stopping = false
@@ -73,7 +81,7 @@ type SuperVideoModel(text: unit -> UiText, post: (unit -> unit) -> unit, liveAct
         for i in 1 .. 5 do frames[i].Label <- sprintf "×%d" (i + 1)
         sizes[0].Label <- t.VideoSameSize
         sizes[1].Label <- "720p"; sizes[2].Label <- "1080p"; sizes[3].Label <- "1440p"; sizes[4].Label <- "4K (2160p)"
-        upscalers[1].Label <- sprintf "Lanczos · %s" t.Sharpness
+        upscalers[2].Label <- sprintf "Lanczos · %s" t.Sharpness
         techniques[1].Label <- sprintf "SMFG · %s" t.Fast
     do relabel ()
 

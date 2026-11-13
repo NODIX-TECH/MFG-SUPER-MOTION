@@ -13,9 +13,10 @@ open System.Text.Json
 /// the Send button.
 module Feedback =
     // The developer's Discord webhook. (MFGSM_FEEDBACK_URL: another address, for tests.)
+    // (Round 88p: the owner's new one - the old webhook was deleted on Discord's side, and every Send got "404 Not Found".)
     let private webhook =
         match Environment.GetEnvironmentVariable "MFGSM_FEEDBACK_URL" with
-        | null | "" -> "https://discord.com/api/webhooks/1561693378679279657/1NSvdiOszJgmNry_P4_W7QDQobL1zrMMdC2fJ2a2TFIl06naZrUqXLwyaaLMjyIMINjj"
+        | null | "" -> "https://discord.com/api/webhooks/1568618691170668654/R5T6a75dnRBLJDmhlruwkWTFeGuKhiCj2i6tKT7O-CRanO-vKQAUB8AErkYA67vRdya4"
         | other -> other
 
     // Discord takes 2000 characters of text and files of a few megabytes: the message is cut to fit, and of a long

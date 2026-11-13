@@ -87,8 +87,25 @@ static int SignalRefresh(const wchar_t *device)
 // With Windows' "Dynamic refresh rate" on, the desktop's mode says 60 Hz whenever little moves on it while the
 // screen runs at its 200: everything paced by the refresh took 60 for the screen's rate - VRR's cap among them
 // (59), and a user saw the screen's rate climb with the game to 58 and stay there.
+// 1.1.0, the testers' frame time line ("it stabilises randomly at times; capped at 45 the graph still would not stay
+// flat"): one tester's counter read 13.11 ms +-2.45, max 20.8 at x2 of 38 - 20.8 is three refreshes of a 144 Hz screen,
+// 13.11 the mean of one and two: a screen at its fixed refresh (no VRR reaching it) shows 77 frames a second on 144
+// refreshes as 1, 2, 2, 1, 2, 3 ... of them, whatever the beat inside. Only a rate that is a whole number of refreshes
+// lies flat there (72 on 144). SM_FAKE_HZ=<hz> (tests): the engine behaves as on such a screen - its refresh that rate,
+// each frame shown at the next refresh of that rate - on a screen that has VRR, where it can be measured.
+static int FakeHz()
+{
+    static const int hz = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_FAKE_HZ", v, sizeof(v)) > 0 ? std::clamp(atoi(v), 0, 1000) : 0; }();
+    return hz >= 24 ? hz : 0;
+}
+static double g_fake_origin = 0.0;         // (SM_FAKE_HZ: where its refreshes are counted from)
+// 1.1.0: what VrrObserve found - 1 the screen follows the frames, 0 it stays at its fixed refresh, -1 not known yet.
+static std::atomic<int> g_screen_follows{-1};
+static double g_present_asked = 0.0;       // (when the Present now being made was asked for - before SM_FAKE_HZ's wait)
+
 static double OutputRefresh()
 {
+    if (FakeHz() > 0) return double(FakeHz());
     static std::atomic<long long> asked{0};
     static std::atomic<int> hz{60};
     const long long now = static_cast<long long>(GetTickCount64());
@@ -292,8 +309,8 @@ static double VrrCeiling(double refresh)
 // above the range are presented without tearing (ShowPresentNow): the screen shows the newest at each refresh there.
 static int VrrCap()
 {
-    if (!lfShow.vrr || !smOpt.screen_limit.load()) return 0;
-    return static_cast<int>(VrrCeiling(OutputRefresh()));
+    // (Round 88r: "Limit to refresh rate" is the Frame limit at the refresh now - ShownCap - with no ceiling of VRR's under it.)
+    return 0;
 }
 
 // Sync mode ("Sync mode" in the app, the option sync): on which refreshes of
@@ -311,6 +328,43 @@ static int SyncEvery()
     const int mode = smOpt.sync.load();
     return (lfShow.vrr || mode < 2 || mode > 4) ? 0 : mode - 1;
 }
+// 1.1.0: on a screen at its fixed refresh, SMFG / SMAI (frames made for any moment) at a beat of a whole number of
+// refreshes - the nearest one at or under what is asked (x2 of 38 on 144 Hz: 72, every frame two refreshes), and over
+// it by no more than 4%. Only with Even pacing (a fixed multiplier at a beat of its own), and only once VrrObserve has
+// seen the screen keep to its refresh. "fit" 0: as asked. DLSS MFG / XeSS MFG make a fixed count a pair at the pair's
+// even places - they cannot be laid on such a beat (round 95: rebuilt at the beat, 21.7% of the steps a quarter off).
+static bool FitActive()
+{
+    return smOpt.fit.load() != 0 && g_screen_follows.load() == 0 && EvenOn() && MsmSelected() && smOpt.adaptive.load() <= 0 &&
+           smOpt.ratio.load() <= 10;
+}
+
+static double FitBeat(double asked)
+{
+    const double refresh = OutputRefresh();
+    if (refresh < 24.0 || asked <= 0.0) return 0.0;
+    const double k = std::max(1.0, std::ceil(refresh / (asked * 1.04)));
+    return refresh / k;
+}
+
+// A frame's moment to be shown, on a fit beat: half a refresh after a refresh (presented there, the screen shows it at
+// the next one, whatever the moment wavers by - the beat is a whole number of refreshes, so is the step between two).
+static double FitSnap(double when)
+{
+    const double refresh = OutputRefresh();
+    if (!FitActive() || refresh < 24.0 || !lfShow.chain) return when;
+    const double period = 1.0 / refresh;
+    double origin = 0.0;
+    static LARGE_INTEGER frequency = {};
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    DXGI_FRAME_STATISTICS st = {};
+    if (FakeHz() > 0) { if (g_fake_origin <= 0.0) return when; origin = g_fake_origin; }
+    else if (SUCCEEDED(lfShow.chain->GetFrameStatistics(&st)) && st.SyncQPCTime.QuadPart > 0) origin = double(st.SyncQPCTime.QuadPart) / double(frequency.QuadPart);
+    else return when;
+    const double n = std::round((when - origin) / period - 0.5);
+    return origin + (n + 0.5) * period;
+}
+
 // Round 45: the frames in between of the pairs just now are more than the screen's refreshes (FgPresent, lf_dlssg.inl).
 static std::atomic<bool> g_present_above{false};
 
@@ -346,8 +400,10 @@ static int PresentCap()
     return lfShow.vrr ? VrrCap() : SyncCap();
 }
 
-// Does the screen follow our frames? Called after every present while VRR is
-// on (one thread presents at a time; the lock only makes sure of it).
+
+// Does the screen follow our frames? Called after every present (one thread presents at a time; the lock only makes
+// sure of it). (1.1.0: with VRR off in the app too - a screen whose driver makes every window's frames VRR follows them
+// all the same, and one without VRR is what FitBeat is for.)
 static void VrrObserve()
 {
     static std::mutex lock;
@@ -360,6 +416,9 @@ static void VrrObserve()
     LARGE_INTEGER freq, now;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&now);
+    if (g_present_asked > 0.0) now.QuadPart = static_cast<LONGLONG>(g_present_asked * double(freq.QuadPart));
+    // (SM_FAKE_HZ: the screen is taken to stay at that refresh - this PC's own follows the frames, and says so.)
+    if (FakeHz() > 0) { g_screen_follows = 0; return; }
     if (chain != lfShow.chain) { chain = lfShow.chain; last_count = 0; last_call = 0; shown = shown_off = sent = sent_off = 0; }
     if (chain == nullptr) return;
     const double period = 1000.0 / OutputRefresh();
@@ -393,6 +452,7 @@ static void VrrObserve()
     if (sent >= 120 && sent_off * 10 >= sent * 3)
     {
         const int follows = shown_off * 10 >= shown * 3 ? 1 : (shown_off * 20 <= shown ? 0 : -1);
+        if (follows != -1) g_screen_follows = follows;
         if (follows != -1 && follows != said)
         {
             said = follows;
@@ -436,9 +496,20 @@ static HRESULT ShowPresentNow(double source)
     if (every == 0 && lfShow.tearing && !smOpt.screen_limit.load() && FgRequested() && g_present_above.load()) how = DXGI_PRESENT_ALLOW_TEARING;
     // Two cards: the frame crosses to the screen's card first (lf_show_relay.inl).
     if (lfRelay.on && !RelayBeforePresent()) return E_FAIL;
-    const HRESULT hr = lfShow.chain->Present(every, how);
+    g_present_asked = LatencyNow();
+    // (SM_FAKE_HZ, tests: shown at the next refresh of that rate, as a screen without VRR shows it.)
+    if (FakeHz() > 0)
+    {
+        const double period = 1.0 / FakeHz(), now = LatencyNow();
+        if (g_fake_origin <= 0.0) g_fake_origin = now;
+        const double next = g_fake_origin + std::ceil((now - g_fake_origin) / period) * period;
+        while (LatencyNow() < next - 0.0015) Sleep(1);
+        while (LatencyNow() < next) YieldProcessor();
+    }
+    const HRESULT hr = lfShow.chain->Present(FakeHz() > 0 ? 0u : every, FakeHz() > 0 && lfShow.tearing ? DXGI_PRESENT_ALLOW_TEARING : how);
+    ++g_pieces[3];
     if (lfRelay.on) RelayAfterPresent();
-    if (lfShow.vrr && SUCCEEDED(hr)) VrrObserve();
+    if (SUCCEEDED(hr)) VrrObserve();
     if (SUCCEEDED(hr)) LatencyPresented(source < 0.0 ? lfCap.stamp : source);
     if (SUCCEEDED(hr)) CounterPresented(source, source < 0.0);
     front::Tell();

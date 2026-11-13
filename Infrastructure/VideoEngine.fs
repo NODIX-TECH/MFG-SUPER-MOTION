@@ -33,10 +33,14 @@ type VideoRun(job: VideoJob, report: VideoEvent -> unit) =
         let first = lock gate (fun () -> if ended then false else (ended <- true; true))
         if first then report event
 
+    // (Linux, round 73: Super Video is a program of its own beside the layer - Linux/engine/video.cpp, ffmpeg's.)
+    let linux = OperatingSystem.IsLinux()
     let enginePath () =
-        match EngineStore.path () with
-        | Some path -> path
-        | None -> Path.Combine(AppContext.BaseDirectory, "Engine", "nvngx.dll")
+        if linux then Path.Combine(AppContext.BaseDirectory, "layer", "mfgsm-video")
+        else
+            match EngineStore.path () with
+            | Some path -> path
+            | None -> Path.Combine(AppContext.BaseDirectory, "Engine", "nvngx.dll")
 
     let onLine (line: string) =
         let parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)
@@ -78,7 +82,7 @@ type VideoRun(job: VideoJob, report: VideoEvent -> unit) =
                 let info =
                     ProcessStartInfo(
                         FileName = engine,
-                        Arguments = sprintf "--video \"%s\"" file,
+                        Arguments = (if linux then sprintf "\"%s\"" file else sprintf "--video \"%s\"" file),
                         WorkingDirectory = Path.GetDirectoryName engine,
                         UseShellExecute = false,
                         CreateNoWindow = true,

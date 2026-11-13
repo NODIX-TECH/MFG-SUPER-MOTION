@@ -151,7 +151,15 @@ static struct LearnState
     // What stays on the screen while the picture moves - the read-outs (HUD): learnt on the small picture, a
     // number a pixel of it (up: it stayed where the picture went; down: it went along), kept with the game.
     static constexpr int kHudMost = 320 * 200;
-    std::vector<float> hud_score;
+    // Round 101 (the owner's rule): a place is a read-out only if it showed as one in more than 75% of the training
+    // phase. So for every pixel of the small picture three counts over the pairs in which the picture went as a
+    // whole: looked at (hud_seen), nearer what it was itself than what the world brought to its place (hud_stay),
+    // nearer what the world brought (hud_went). Until round 100 it was one number that forgot (0.97 a pair): what
+    // the last second of turning said, so a piece of a wall, a weapon in the hand, a patch of road that happened
+    // to stay for a second became a "read-out" and stood still in the frames in between.
+    static constexpr unsigned kHudLeast = 90;       // pairs looked at before any map is made
+    static constexpr unsigned kHudWindow = 4000;    // after so many, older pairs count half (the phase goes on with the play)
+    std::vector<unsigned short> hud_seen, hud_stay, hud_went;
     std::vector<unsigned char> hud_before, hud_cells;      // the small picture of the frame before; 1: a read-out
     int hud_w = 0, hud_h = 0;
     bool hud_shift_known = false;           // this pair: the picture went as a whole by ...
@@ -281,6 +289,9 @@ static bool LearnTurning()
 }
 
 // ---- Listening to the hand --------------------------------------------------
+// (Round 74, put back in round 88 - the 1.0.3 source had lost it: this part is Windows' own; MFG SUPER MOTION for
+// Linux listens its own way - Linux\engine\aml_hand_linux.inl, the same LearnPush and held[] under the same numbers.)
+#ifdef _WIN32
 
 // Round 35: every other pad - a DualSense or DualShock, a Switch Pro, a gamepad or joystick of any make - as
 // raw input tells of it (HID), read by what its own report says it holds (hid.dll's HidP_ calls, asked for by
@@ -579,6 +590,9 @@ static void LearnListen(bool on)
     CloseHandle(g.thread);
     g.thread = nullptr;
 }
+#else
+#include "aml_hand_linux.inl"
+#endif
 
 // ---- What is learnt ---------------------------------------------------------
 
@@ -895,7 +909,7 @@ static bool LearnHeldExpect(double lasted, float &across, float &down)
 // read-outs are learnt. Where the picture went by (sx, sy), a pixel of it is either where its place came from -
 // the game's world - or what it was before - a read-out, the player's own car, a crosshair. Whichever of the two
 // it is nearer to is counted for it, when they differ enough to tell; a see-through panel's inside goes with the
-// world behind it, and that is what it shows. Seven in ten pairs one way for a while make a pixel a read-out.
+// world behind it, and that is what it shows. Round 101: counted over the whole training phase (LearnHudCells).
 static void LearnSeen(const unsigned char *luma, int w, int h)
 {
     LearnState &g = g_learn;
@@ -905,11 +919,12 @@ static void LearnSeen(const unsigned char *luma, int w, int h)
         return;
     }
     const size_t n = static_cast<size_t>(w) * h;
-    if (g.hud_w != w || g.hud_h != h || g.hud_score.size() != n)
+    if (g.hud_w != w || g.hud_h != h || g.hud_seen.size() != n)
     {
         // (A map kept for the game at another size is let go: the picture is another one.)
         g.hud_w = w; g.hud_h = h;
-        g.hud_score.assign(n, 0.0f);
+        g.hud_seen.assign(n, 0); g.hud_stay.assign(n, 0); g.hud_went.assign(n, 0);
+        g.hud_pairs = g.hud_told = 0;
         g.hud_before.clear();
         g.hud_shift_known = false;
     }
@@ -927,13 +942,23 @@ static void LearnSeen(const unsigned char *luma, int w, int h)
                 if (from_x < 0 || from_x >= w) continue;
                 const size_t at = static_cast<size_t>(y) * w + x;
                 const int stays = std::abs(int(luma[at]) - int(a[at])), moves = std::abs(int(luma[at]) - int(a[static_cast<size_t>(from_y) * w + from_x]));
-                if (std::max(stays, moves) < 6) continue;
-                const float says = std::clamp((moves - stays) / 8.0f, -1.0f, 1.0f);
-                g.hud_score[at] = g.hud_score[at] * 0.97f + says;
+                ++g.hud_seen[at];
+                if (std::max(stays, moves) < 6) continue;       // (the two are alike here: this pair cannot tell)
+                if (moves > stays) ++g.hud_stay[at];
+                else if (stays > moves) ++g.hud_went[at];
             }
         }
         ++g.hud_pairs;
         g.changed = true;
+        // The phase goes on with the play: past the window an older pair counts half, so a game whose read-outs
+        // change (on foot, in a car) is followed - slowly, over minutes, never by a second's turning.
+        if (g.hud_pairs % 256 == 0)
+        {
+            unsigned short most = 0;
+            for (const unsigned short seen : g.hud_seen) most = std::max(most, seen);
+            if (most >= LearnState::kHudWindow)
+                for (size_t i = 0; i < n; ++i) { g.hud_seen[i] >>= 1; g.hud_stay[i] >>= 1; g.hud_went[i] >>= 1; }
+        }
     }
     g.hud_before.assign(luma, luma + n);
 }
@@ -943,37 +968,134 @@ static void LearnHudCells()
 {
     LearnState &g = g_learn;
     const int w = g.hud_w, h = g.hud_h;
-    if (w <= 0 || g.hud_score.size() != static_cast<size_t>(w) * h) return;
-    std::vector<unsigned char> sure(g.hud_score.size()), cells(g.hud_score.size());
-    // Round 41: half as much evidence again before a pixel counts (12, was 8) - and only where a game puts its
-    // read-outs: along the picture's edges (a fifth of it in from each side) and a small spot in its middle (the
-    // crosshair). A piece of a wall or a tree that happened to look the same while the picture moved, anywhere
-    // else, was a "read-out" held still by SMFG: a square that stood while everything around it moved.
+    if (w <= 0 || g.hud_seen.size() != static_cast<size_t>(w) * h) return;
+    std::vector<unsigned char> sure(g.hud_seen.size()), cells(g.hud_seen.size());
+    // Round 101, the owner's rule: a read-out only if it showed as one in more than 75% of the training phase.
+    // Of the pairs that could tell (it was nearer what it was itself, or nearer what the world brought), more than
+    // three in four say it stayed - and it was told apart from the world in half of all the pairs it was looked at
+    // in at least: a patch of sky is like the sky that comes to its place, says nothing, and is no read-out.
+    // (Tried on recordings of real games, tests\hudrule.py: GTA V on foot and in first person, a shooter - the map,
+    // the bars and the counters stay cells; the weapon in the hand, the road and the wall beside the player, which
+    // the forgetting count of rounds 20 - 100 took for read-outs at one time or another, do not.)
+    // Round 41, kept: only where a game puts its read-outs - along the picture's edges (a fifth of it in from each
+    // side) and a small spot in its middle (the crosshair).
+    //
+    // Round 112 (the owner: "the HUD moves a lot, the character has ghosting"). On the owner's own GTA V file (1564
+    // pairs, tests\hudmap.py) that rule held the minimap's bar and arrow but not the minimap itself - a map that turns
+    // and scrolls with the player stayed in 69% of the pairs, the Afterburner text in 66% - and it DID hold the
+    // character's legs (75%: the player stands where the camera follows), so the legs were shown as the real frame
+    // while everything else moved - the ghost. Now: the 75% makes a read-out sure (a seed); what stayed in more than
+    // 65% of the pairs and hangs together with a seed is the same panel; and a patch of what stays that lies more
+    // inside the picture than in the edge band is the player's own character, car or weapon - neither it nor anything
+    // within four cells of it is a read-out. (The file's counts are the same: no learning anew.) There: the text and
+    // the whole minimap held, the character and the road beside it not; at 60% the road begins to come in.
+    unsigned short most = 0;
+    for (const unsigned short seen : g.hud_seen) most = std::max(most, seen);
+    std::vector<unsigned char> zone(sure.size()), seeds(sure.size()), grow(sure.size());
     for (size_t i = 0; i < sure.size(); ++i)
     {
         const int x = static_cast<int>(i % w), y = static_cast<int>(i / w);
         const bool edge = x < w / 5 || x >= w - w / 5 || y < h / 5 || y >= h - h / 5;
         const bool middle = std::abs(2 * x - w) < w / 40 && std::abs(2 * y - h) < h / 24;      // a crosshair's size, not a character's
-        sure[i] = g.hud_score[i] >= 12.0f && (edge || middle);
+        const unsigned seen = g.hud_seen[i], stay = g.hud_stay[i], went = g.hud_went[i];
+        const bool told = seen * 3 >= most && stay * 2 >= seen;
+        zone[i] = edge || middle;
+        seeds[i] = told && stay * 4 > (stay + went) * 3;
+        grow[i] = told && stay * 20 > (stay + went) * 13;
     }
     // And compact: a read-out is text, an icon, a map - a cell counts with eight or more of the twenty-four around it
     // counted as well. Lone cells scattered over the sky or a treetop were the picture, not a read-out.
+    const auto compact = [w, h](std::vector<unsigned char> &m)
     {
-        std::vector<unsigned char> compact(sure.size(), 0);
+        std::vector<unsigned char> kept(m.size(), 0);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x)
             {
-                if (!sure[static_cast<size_t>(y) * w + x]) continue;
+                if (!m[static_cast<size_t>(y) * w + x]) continue;
                 int around = 0;
                 for (int dy = -2; dy <= 2; ++dy)
                     for (int dx = -2; dx <= 2; ++dx)
                     {
                         const int nx = x + dx, ny = y + dy;
-                        if ((dx || dy) && nx >= 0 && ny >= 0 && nx < w && ny < h && sure[static_cast<size_t>(ny) * w + nx]) ++around;
+                        if ((dx || dy) && nx >= 0 && ny >= 0 && nx < w && ny < h && m[static_cast<size_t>(ny) * w + nx]) ++around;
                     }
-                compact[static_cast<size_t>(y) * w + x] = around >= 8;
+                kept[static_cast<size_t>(y) * w + x] = around >= 8;
             }
-        sure.swap(compact);
+        m.swap(kept);
+    };
+    // (Patches that hang together, the eight around a cell counting: their number for each cell, 0 none.)
+    const auto patches = [w, h](const std::vector<unsigned char> &m, std::vector<int> &label)
+    {
+        label.assign(m.size(), 0);
+        int count = 0;
+        std::vector<int> stack;
+        for (size_t start = 0; start < m.size(); ++start)
+        {
+            if (!m[start] || label[start]) continue;
+            label[start] = ++count;
+            stack.assign(1, static_cast<int>(start));
+            while (!stack.empty())
+            {
+                const int at = stack.back();
+                stack.pop_back();
+                const int x = at % w, y = at / w;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        const size_t i = static_cast<size_t>(ny) * w + nx;
+                        if (m[i] && !label[i]) { label[i] = count; stack.push_back(static_cast<int>(i)); }
+                    }
+            }
+        }
+        return count;
+    };
+    compact(seeds);
+    compact(grow);
+    // The player's own: the seeds' patches (a cell between two counting) that lie more inside than in the band.
+    std::vector<unsigned char> forbidden(sure.size(), 0);
+    {
+        std::vector<unsigned char> joined(sure.size(), 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int dy = -1; dy <= 1 && !joined[static_cast<size_t>(y) * w + x]; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx >= 0 && ny >= 0 && nx < w && ny < h && seeds[static_cast<size_t>(ny) * w + nx]) { joined[static_cast<size_t>(y) * w + x] = 1; break; }
+                    }
+        std::vector<int> label;
+        const int count = patches(joined, label);
+        std::vector<int> inside(count + 1, 0), banded(count + 1, 0);
+        for (size_t i = 0; i < sure.size(); ++i)
+            if (label[i] && seeds[i]) ++(zone[i] ? banded : inside)[label[i]];
+        const int least = std::max(8, w * h / 1920);        // (30 cells of 320 x 180)
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                const int at = label[static_cast<size_t>(y) * w + x];
+                if (!at || inside[at] < least || inside[at] <= banded[at]) continue;
+                for (int dy = -4; dy <= 4; ++dy)
+                    for (int dx = -4; dx <= 4; ++dx)
+                    {
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx >= 0 && ny >= 0 && nx < w && ny < h) forbidden[static_cast<size_t>(ny) * w + nx] = 1;
+                    }
+            }
+    }
+    for (size_t i = 0; i < sure.size(); ++i)
+    {
+        seeds[i] = seeds[i] && zone[i] && !forbidden[i];
+        grow[i] = (grow[i] && zone[i] && !forbidden[i]) || seeds[i];
+    }
+    {
+        std::vector<int> label;
+        const int count = patches(grow, label);
+        std::vector<unsigned char> seeded(count + 1, 0);
+        for (size_t i = 0; i < sure.size(); ++i)
+            if (seeds[i]) seeded[label[i]] = 1;
+        for (size_t i = 0; i < sure.size(); ++i) sure[i] = grow[i] && seeded[label[i]];
     }
     unsigned count = 0;
     for (int y = 0; y < h; ++y)
@@ -997,7 +1119,9 @@ static void LearnHudCells()
     {
         std::vector<int> stack;
         std::vector<unsigned char> seen(cells.size(), 0), dropped(cells.size(), 0);
-        const size_t most = cells.size() * 3 / 100;     // (round 41: three hundredths - a minimap, a wide bar; was one)
+        // (Round 41: three hundredths - a minimap, a wide bar; was one. Round 112: five - GTA V's minimap, held whole
+        // with the cell around it, is 3.3 of 320 x 180; the player's character, car and road go by the rule above.)
+        const size_t most = cells.size() * 5 / 100;
         for (size_t start = 0; start < cells.size(); ++start)
         {
             if (!cells[start] || seen[start]) continue;
@@ -1428,10 +1552,12 @@ static void LearnHudSave()
     swprintf_s(draft, L"%s.new", path);
     FILE *file = _wfsopen(draft, L"wb", _SH_DENYWR);
     if (!file) return;
-    fprintf(file, "hud1 %d %d %u\n", g.hud_w, g.hud_h, g.hud_pairs);
-    std::vector<signed char> kept(g.hud_score.size());
-    for (size_t i = 0; i < kept.size(); ++i) kept[i] = static_cast<signed char>(std::clamp(std::lround(g.hud_score[i] * 4.0f), -124L, 124L));
-    const bool whole = fwrite(kept.data(), 1, kept.size(), file) == kept.size();
+    // (Round 101: "hud2" - the three counts of every pixel. A "hud1" file, the forgetting count of the rounds
+    // before, is not read any more: the game's read-outs are learnt anew by the 75% rule.)
+    fprintf(file, "hud2 %d %d %u\n", g.hud_w, g.hud_h, g.hud_pairs);
+    const size_t n = g.hud_seen.size();
+    const bool whole = fwrite(g.hud_seen.data(), sizeof(unsigned short), n, file) == n && fwrite(g.hud_stay.data(), sizeof(unsigned short), n, file) == n &&
+                       fwrite(g.hud_went.data(), sizeof(unsigned short), n, file) == n;
     fclose(file);
     if (whole && MoveFileExW(draft, path, MOVEFILE_REPLACE_EXISTING)) g.hud_changed = false; else DeleteFileW(draft);
 }
@@ -1439,7 +1565,7 @@ static void LearnHudSave()
 static void LearnHudLoad()
 {
     LearnState &g = g_learn;
-    g.hud_score.clear(); g.hud_before.clear();
+    g.hud_seen.clear(); g.hud_stay.clear(); g.hud_went.clear(); g.hud_before.clear();
     g.hud_w = g.hud_h = 0; g.hud_pairs = g.hud_told = 0;
     g.hud_changed = false;
     { std::lock_guard<std::mutex> hold(g.hud_lock); g.hud_cells.clear(); g.hud_fresh = false; }
@@ -1449,18 +1575,24 @@ static void LearnHudLoad()
     char line[64] = "";
     int w = 0, h = 0;
     unsigned pairs = 0;
-    if (fgets(line, sizeof(line), file) && sscanf_s(line, "hud1 %d %d %u", &w, &h, &pairs) == 3 && w >= 64 && h >= 36 && w * h <= LearnState::kHudMost)
+    const bool read = fgets(line, sizeof(line), file) != nullptr;
+    if (read && sscanf_s(line, "hud2 %d %d %u", &w, &h, &pairs) == 3 && w >= 64 && h >= 36 && w * h <= LearnState::kHudMost)
     {
-        std::vector<signed char> kept(static_cast<size_t>(w) * h);
-        if (fread(kept.data(), 1, kept.size(), file) == kept.size())
+        const size_t n = static_cast<size_t>(w) * h;
+        std::vector<unsigned short> seen(n), stay(n), went(n);
+        if (fread(seen.data(), sizeof(unsigned short), n, file) == n && fread(stay.data(), sizeof(unsigned short), n, file) == n &&
+            fread(went.data(), sizeof(unsigned short), n, file) == n)
         {
             g.hud_w = w; g.hud_h = h; g.hud_pairs = pairs;
-            g.hud_score.resize(kept.size());
-            for (size_t i = 0; i < kept.size(); ++i) g.hud_score[i] = kept[i] / 4.0f;
+            g.hud_seen.swap(seen); g.hud_stay.swap(stay); g.hud_went.swap(went);
         }
     }
+    else if (read && strncmp(line, "hud1 ", 5) == 0)
+        Trace("[aml] the read-outs kept for %s are of the rule before round 101 - learnt anew (a place is a read-out only if it showed as one in more than 75%% of the training)",
+              g.game[0] ? g.game : "this game");
     fclose(file);
-    if (g.hud_w > 0) { LearnHudCells(); g.hud_told = g.hud_pairs; }
+    // (The cells are made of them, and handed to the generator, by LearnTell within a second - once the game's
+    // file has said it was studied, which is read after this.)
 }
 
 static void LearnSave()
@@ -1600,6 +1732,10 @@ static void LearnLoad()
 
 // The game that is played: the program the source window belongs to (the window in front, for a whole screen).
 // What was learnt for it before is taken up.
+// (Round 74, put back in round 88: Linux names the game its own way - the layer is in it: Linux\engine\aml_game_linux.inl.)
+#ifndef _WIN32
+#include "aml_game_linux.inl"
+#else
 static void LearnGame(HWND window, unsigned w, unsigned h)
 {
     LearnState &g = g_learn;
@@ -1644,6 +1780,7 @@ static void LearnGame(HWND window, unsigned w, unsigned h)
     Trace("[aml] %s: %s", g.game, LearnKnown(g.model[0]) || LearnKnown(g.model[1]) ? "learnt before - taken up" :
           (g.model[0].seen || g.model[1].seen) ? "partly learnt before - going on" : "not learnt yet");
 }
+#endif
 
 // "Delete" in the app, for a game by its name. If that is the game played now, it is learnt from the start.
 static void LearnForget(const char *game)
@@ -1664,7 +1801,7 @@ static void LearnForget(const char *game)
     g_learn_flow = 0;
     wchar_t hud[MAX_PATH];
     if (LearnHudFile(hud)) DeleteFileW(hud);
-    g.hud_score.assign(g.hud_score.size(), 0.0f);
+    g.hud_seen.assign(g.hud_seen.size(), 0); g.hud_stay.assign(g.hud_stay.size(), 0); g.hud_went.assign(g.hud_went.size(), 0);
     g.hud_pairs = g.hud_told = 0; g.hud_changed = false;
     { std::lock_guard<std::mutex> hold(g.hud_lock); g.hud_cells.assign(g.hud_cells.size(), 0); g.hud_fresh = !g.hud_cells.empty(); }
     if (g.file[0]) DeleteFileW(g.file);
@@ -1785,8 +1922,10 @@ static void LearnTell()
         const std::wstring second = std::to_wstring(g.step + 1) + L"/" + std::to_wstring(g.plan_count) + L"  \x00B7  " + g.say[line[g.plan[g.step]]];
         BannerSay(first.c_str(), second.c_str());
     }
-    // The read-outs: a new map for the generator after every thirty pairs learnt from (while studied: sixty).
-    if (wanted && g.hud_pairs >= g.hud_told + (g.studied ? 60u : 30u))
+    // The read-outs. Round 101: no map before the training phase is through - the game studied, and ninety pairs
+    // in which the picture went as a whole looked at (until then SMFG's own marks, pair by pair, are all there
+    // is; a map made of the first thirty pairs was a second's turning). After that a new one every sixty pairs.
+    if (wanted && g.studied && g.hud_pairs >= LearnState::kHudLeast && (g.hud_told == 0 || g.hud_pairs >= g.hud_told + 60u))
     {
         g.hud_told = g.hud_pairs;
         g.hud_changed = true;

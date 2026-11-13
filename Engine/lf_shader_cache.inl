@@ -19,6 +19,12 @@
 //     file;
 //   - one compile per shader: a second caller asking for a shader another
 //     thread is compiling waits for it instead of compiling it again.
+// 1.1.0 (the testers: "the shaders take long the first time"): the compiled code ships with the engine - a folder
+// "shaders" beside nvngx.dll, read first and never written (it is in Program Files). The compiler's output (DXBC) is
+// the same on every card, so a person's first start compiles nothing that was in it. It is filled by running the
+// engine with LF_SHADER_COLLECT=<folder> (every shader it compiles or reads is copied there) through the smoke tests,
+// which go through every generator and feature - Engine\collect-shaders.ps1. A shader changed since is simply not in
+// it under its new name and is compiled as before.
 // ShaderWarmStart (lf_shader_warm.inl) compiles what this run will need on
 // background threads from the first moment the worker runs, while the card
 // and the network start - so even the very first start after an update finds
@@ -34,6 +40,8 @@ struct ShaderCacheState
     HRESULT(WINAPI *make_blob)(SIZE_T, ID3DBlob **) = nullptr;
     std::wstring folder;
     bool folder_ok = false;
+    std::wstring shipped, collect;          // 1.1.0: the engine's own folder of compiled code; LF_SHADER_COLLECT's
+    bool shipped_ok = false;
     bool loaded = false;
     unsigned hits_memory = 0, hits_file = 0, compiled = 0;
     double compile_seconds = 0.0;
@@ -72,6 +80,21 @@ static void ShaderCacheLoad(ShaderCacheState &sc)
         len = GetTempPathW(MAX_PATH, path);
         if (len > 0 && len < MAX_PATH - 64) wcscat_s(path, L"SuperMotion-shaders");
         else path[0] = L'\0';
+    }
+    {
+        wchar_t own[MAX_PATH] = {};
+        const DWORD n = GetModuleFileNameW(nullptr, own, MAX_PATH);
+        wchar_t *slash = n > 0 && n < MAX_PATH ? wcsrchr(own, L'\\') : nullptr;
+        if (slash)
+        {
+            wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - own), L"shaders");
+            const DWORD attributes = GetFileAttributesW(own);
+            sc.shipped_ok = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            sc.shipped = own;
+        }
+        wchar_t collect[MAX_PATH] = {};
+        const DWORD c = GetEnvironmentVariableW(L"LF_SHADER_COLLECT", collect, MAX_PATH);
+        if (c > 0 && c < MAX_PATH - 64) { CreateDirectoryW(collect, nullptr); sc.collect = collect; }
     }
     if (path[0] != L'\0')
     {
@@ -162,10 +185,11 @@ static HRESULT WINAPI CachedCompile(LPCVOID source, SIZE_T size, LPCSTR name, co
         }
         sc.busy.insert(key);
     }
-    wchar_t file[MAX_PATH + 64] = {};
+    wchar_t file[MAX_PATH + 64] = {}, shipped[MAX_PATH + 64] = {};
     if (sc.folder_ok) swprintf_s(file, L"%s\\%016llX-%S.cso", sc.folder.c_str(), key, entry ? entry : "main");
+    if (sc.shipped_ok) swprintf_s(shipped, L"%s\\%016llX-%S.cso", sc.shipped.c_str(), key, entry ? entry : "main");
     HRESULT hr = S_OK;
-    bool from_file = sc.folder_ok && ShaderFileRead(sc, file, code);
+    bool from_file = (sc.shipped_ok && ShaderFileRead(sc, shipped, code)) || (sc.folder_ok && ShaderFileRead(sc, file, code));
     double seconds = 0.0;
     if (!from_file)
     {
@@ -173,6 +197,12 @@ static HRESULT WINAPI CachedCompile(LPCVOID source, SIZE_T size, LPCSTR name, co
         hr = compile(source, size, name, defines, include, entry, target, flags1, flags2, code, errors);
         seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         if (SUCCEEDED(hr) && *code != nullptr && sc.folder_ok) ShaderFileWrite(file, *code);
+    }
+    if (SUCCEEDED(hr) && *code != nullptr && !sc.collect.empty())
+    {
+        wchar_t kept[MAX_PATH + 64] = {};
+        swprintf_s(kept, L"%s\\%016llX-%S.cso", sc.collect.c_str(), key, entry ? entry : "main");
+        if (GetFileAttributesW(kept) == INVALID_FILE_ATTRIBUTES) ShaderFileWrite(kept, *code);
     }
     {
         std::lock_guard<std::mutex> hold(sc.lock);

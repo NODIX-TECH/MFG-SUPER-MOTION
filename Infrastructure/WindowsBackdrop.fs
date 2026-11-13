@@ -49,6 +49,12 @@ module WindowsBackdrop =
         DwmSetWindowAttribute(handle, attribute, &value, sizeof<int>)
 
     let setTheme handle dark =
+        // 1.1.0 (GitHub 87, the Windows 10 fix): Windows 10 has a dark title bar too - DWMWA_USE_IMMERSIVE_DARK_MODE is 20
+        // from build 18985 on, 19 before it (1809 - 1903). Only the title bar's darkness there: the caption colours and
+        // the rounded corners below are Windows 11's.
+        if handle <> 0n && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763) && not (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) then
+            let attribute = if OperatingSystem.IsWindowsVersionAtLeast(10, 0, 18985) then 20 else 19
+            setAttribute handle attribute (if dark then 1 else 0) |> ignore
         if handle <> 0n && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) then
             setAttribute handle 20 (if dark then 1 else 0) |> ignore
             // COLORREF is 0x00BBGGRR. These match the stable canvas palette.

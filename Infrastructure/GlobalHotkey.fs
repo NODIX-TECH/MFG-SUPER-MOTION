@@ -165,7 +165,9 @@ type GlobalHotkey() =
     /// modifiers * 65536 + virtual key (RegisterHotKey's values); 0 for none.
     member _.Set(value: int) =
         Volatile.Write(&wanted, value)
-        if not started then
+        // (Linux: no shortcut - Windows' calls are all this is made of.)
+        if not (OperatingSystem.IsWindows()) then ()
+        elif not started then
             started <- true
             thread.Start()
             ready.Wait 2000 |> ignore

@@ -36,6 +36,7 @@ namespace supervideo
     {
         std::wstring input, output;
         int multiplier = 2, height = 0, codec = 0, share = 75;
+        int mbit = 0;       // round 87: video_mbit, the new video's Mbit/s (0: by its size and rate) - tests' frames judged with little encoding loss
     };
     static Job g_job;
     static std::atomic<bool> g_stop{false};
@@ -73,6 +74,7 @@ namespace supervideo
             else if (key == "video_height") g_job.height = std::clamp(atoi(value), 0, 4320);
             else if (key == "video_codec") g_job.codec = std::clamp(atoi(value), 0, 1);
             else if (key == "video_share") g_job.share = std::clamp(atoi(value), 25, 100);
+            else if (key == "video_mbit") g_job.mbit = std::clamp(atoi(value), 0, 150);
         }
         fclose(file);
     }
@@ -164,6 +166,40 @@ namespace supervideo
         MFGetAttributeSize(vtype.get(), MF_MT_FRAME_SIZE, &w, &h);
         MFGetAttributeRatio(vtype.get(), MF_MT_FRAME_RATE, &rate_num, &rate_den);
         if (w < 64 || h < 64 || rate_num == 0 || rate_den == 0) { Fail("the video's size or rate is not known"); return 4; }
+        // 1.1.0 (GitHub 82, "the upscaling outputs corrupted files" - a DVD collection made larger). Two things of a
+        // video's own the engine did not read:
+        //  - the part of the frame that is shown: a 1080p video is often stored 1088 rows high, the last 8 not to be
+        //    seen (MF_MT_MINIMUM_DISPLAY_APERTURE) - they were taken in, a band of green or garbage under the picture;
+        //  - the shape of its pixels: a 16:9 DVD is 720x480 of wide pixels (MF_MT_PIXEL_ASPECT_RATIO 32:27) - it came out
+        //    1620x1080 of square ones, squeezed to 4:3.
+        // Now only the shown part is taken (cut, x, y), and the new video's width follows the picture as it is seen.
+        UINT cut_x = 0, cut_y = 0;
+        const UINT stored_row = w * 4;      // (a frame's row as stored, for one handed over in the processor's memory)
+        {
+            // (Said by the video's own type - the decoded one, turned to BGRA, no longer says it - and by that one's
+            // geometric aperture where it has no other; the one handed over is read last.)
+            MFVideoArea area = {};
+            UINT32 got = 0;
+            com_ptr<IMFMediaType> native;
+            reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, native.put());
+            bool found = false;
+            for (IMFMediaType *type : { native.get(), vtype.get() })
+                for (const GUID &key : { MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_GEOMETRIC_APERTURE })
+                    if (!found && type && SUCCEEDED(type->GetBlob(key, reinterpret_cast<UINT8 *>(&area), sizeof(area), &got)) && got == sizeof(area)) found = true;
+            if (found)
+            {
+                const LONG ax = area.OffsetX.value, ay = area.OffsetY.value, aw = area.Area.cx, ah = area.Area.cy;
+                if (ax >= 0 && ay >= 0 && aw >= 64 && ah >= 64 && UINT(ax + aw) <= w && UINT(ay + ah) <= h && (UINT(aw) != w || UINT(ah) != h))
+                {
+                    Trace("[video] the frames are %ux%u, %ldx%ld of them shown (from %ld,%ld) - that part is taken", w, h, aw, ah, ax, ay);
+                    cut_x = UINT(ax); cut_y = UINT(ay); w = UINT(aw); h = UINT(ah);
+                }
+            }
+        }
+        UINT32 par_num = 1, par_den = 1;
+        if (FAILED(MFGetAttributeRatio(vtype.get(), MF_MT_PIXEL_ASPECT_RATIO, &par_num, &par_den)) || par_num == 0 || par_den == 0) par_num = par_den = 1;
+        const double par = std::clamp(double(par_num) / par_den, 0.25, 4.0);
+        if (std::fabs(par - 1.0) > 0.01) Trace("[video] its pixels are %u:%u - the new video is made of square ones, as wide as the picture is seen", par_num, par_den);
         PROPVARIANT dur;
         PropVariantInit(&dur);
         UINT64 duration = 0;
@@ -198,11 +234,11 @@ namespace supervideo
         }
 
         // The new video's size: the asked height, the width following (both even, as encoders want them).
-        UINT ow = w & ~1u, oh = h & ~1u;
+        UINT ow = static_cast<UINT>(std::lround(w * par)) & ~1u, oh = h & ~1u;
         if (job.height > 0 && UINT(job.height) != h)
         {
             oh = UINT(job.height) & ~1u;
-            ow = static_cast<UINT>(std::lround(double(w) * oh / h)) & ~1u;
+            ow = static_cast<UINT>(std::lround(double(w) * par * oh / h)) & ~1u;
         }
         const UINT n = static_cast<UINT>(job.multiplier);
         const UINT out_num = rate_num * n, out_den = rate_den;
@@ -215,10 +251,12 @@ namespace supervideo
         int codec = job.codec;
         auto make_writer = [&](int kind) -> HRESULT {
             writer = nullptr;
-            bitrate = static_cast<UINT32>(std::clamp(double(ow) * oh * std::min(out_fps, 240.0) * (kind ? 0.05 : 0.08), 4e6, 150e6));
+            bitrate = static_cast<UINT32>(job.mbit ? job.mbit * 1e6 : std::clamp(double(ow) * oh * std::min(out_fps, 240.0) * (kind ? 0.05 : 0.08), 4e6, 150e6));
             com_ptr<IMFAttributes> wa;
             MFCreateAttributes(wa.put(), 4);
-            wa->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+            // (SM_VIDEO_SOFT=1, tests: Windows' own software encoder, as on a PC whose card has none the writer takes.)
+            static const bool soft = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_VIDEO_SOFT", v, sizeof(v)) > 0 && v[0] == '1'; }();
+            wa->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, soft ? FALSE : TRUE);
             wa->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, manager.get());
             wa->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
             HRESULT r = MFCreateSinkWriterFromURL(job.output.c_str(), nullptr, wa.get(), writer.put());
@@ -343,7 +381,15 @@ namespace supervideo
         // Round 52, SMFG AI (msm_ai.h): the network makes all of a pair's frames in between at once, each into a
         // picture of its own; they are handed to the encoder one after the other.
         com_ptr<ID3D12Resource> ai_out[msmai::kMost];
-        const bool ai = smOpt.msm_ai.load() != 0;
+        // (Round 88c: msm_ai 1 is SMAI - the network makes the frames; SM_AI_HELP=1, for tests: it only helps SMFG.)
+        const bool ai_helps = smOpt.msm_ai.load() == 1 && [] { char v[4] = {}; return GetEnvironmentVariableA("SM_AI_HELP", v, sizeof(v)) && v[0] == '1'; }();
+        const bool ai = smOpt.msm_ai.load() != 0 && !ai_helps;
+        // (Round 87j: here the network is waited for, not made ready behind SMFG 1.1 - SM_AI_WAIT=0, for tests: as in a
+        // game, SMFG 1.1 first while it is set up on its own thread.)
+        {
+            char wait[8] = {};
+            msmai::InPlace(!(GetEnvironmentVariableA("SM_AI_WAIT", wait, sizeof(wait)) && wait[0] == '0'));
+        }
         for (UINT k = 0; ai && k + 1 < n && k < msmai::kMost; ++k)
         {
             D3D12_HEAP_PROPERTIES heap = {}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -385,6 +431,8 @@ namespace supervideo
         if (n > 1 && !MsmReady(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, job.share)) { Fail("SMFG could not be made for this size"); return 6; }
         const bool scaled = ow != w || oh != h;
         const bool reshape = scaled || smOpt.upscaler.load() != 0 || smOpt.over_sharpness.load() > 0;
+        // (Round 88k: SMSR 1.0 made ready before the first frame - every frame of the video is to be its.)
+        if (scaled && smOpt.upscaler.load() == 5 && !SmsrPrepare()) Trace("[video] SMSR 1.0 is not here - Lanczos");
 
         com_ptr<ID3D12CommandAllocator> alloc;
         com_ptr<ID3D12GraphicsCommandList> list;
@@ -420,6 +468,35 @@ namespace supervideo
             com_ptr<ID3D11Texture2D> frame;
             if (FAILED(d11->CreateTexture2D(&td, nullptr, frame.put()))) return false;
             ctx->CopyResource(frame.get(), out11.get());
+            // SM_VIDEO_DUMP=<path> (tests, round 88k): output frames 16 to 23 written raw as they go to the encoder -
+            // <path>-<n>-<DXGI format>-<width>x<height>.raw - to check an upscaler's own pixels without the encoder's loss.
+            if (frames_out >= 16 && frames_out <= 23)
+            {
+                char dump[MAX_PATH] = {};
+                if (GetEnvironmentVariableA("SM_VIDEO_DUMP", dump, MAX_PATH) > 0)
+                {
+                    D3D11_TEXTURE2D_DESC sd2 = td;
+                    sd2.Usage = D3D11_USAGE_STAGING; sd2.BindFlags = 0; sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd2.MiscFlags = 0;
+                    com_ptr<ID3D11Texture2D> staging;
+                    D3D11_MAPPED_SUBRESOURCE m = {};
+                    if (SUCCEEDED(d11->CreateTexture2D(&sd2, nullptr, staging.put())))
+                    {
+                        ctx->CopyResource(staging.get(), frame.get());
+                        if (SUCCEEDED(ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &m)))
+                        {
+                            char name[MAX_PATH + 64];
+                            sprintf_s(name, "%s-%llu-%u-%ux%u.raw", dump, frames_out, unsigned(td.Format), td.Width, td.Height);
+                            FILE *file = nullptr;
+                            if (fopen_s(&file, name, "wb") == 0 && file)
+                            {
+                                for (UINT y = 0; y < td.Height; ++y) fwrite(static_cast<const char *>(m.pData) + size_t(y) * m.RowPitch, 1, size_t(td.Width) * 4, file);
+                                fclose(file);
+                            }
+                            ctx->Unmap(staging.get(), 0);
+                        }
+                    }
+                }
+            }
             ctx4->Signal(fence11.get(), ++fv);
             ctx->Flush();
             queue->Wait(fence12.get(), fv);
@@ -459,7 +536,10 @@ namespace supervideo
 
         MsmAsk ask;
         ask.fast = smOpt.msm_search.load() != 0;
-        ask.marks = false;          // (a video has no read-outs of its own to keep still)
+        static const bool video_marks = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_VIDEO_MARKS", v, sizeof(v)) && v[0] == '1'; }();
+        // (A video has no read-outs of its own to keep still. Round 112, for tests: SM_VIDEO_MARKS=1 - a game's
+        //  recording has its HUD, and SMFG's marks are tried on it as they run in a game.)
+        ask.marks = video_marks;
         int slot = 0;
         bool have_before = false;
         LONGLONG before_time = 0, last_length = static_cast<LONGLONG>(1e7 * rate_den / rate_num);
@@ -492,7 +572,7 @@ namespace supervideo
                 com_ptr<ID3D11Texture2D> texture;
                 UINT sub = 0;
                 if (FAILED(dx->GetResource(IID_PPV_ARGS(texture.put()))) || FAILED(dx->GetSubresourceIndex(&sub))) continue;
-                D3D11_BOX box = { 0, 0, 0, w, h, 1 };
+                D3D11_BOX box = { cut_x, cut_y, 0, cut_x + w, cut_y + h, 1 };
                 ctx->CopySubresourceRegion(in11[slot].get(), 0, 0, 0, 0, texture.get(), sub, &box);
             }
             else
@@ -502,14 +582,15 @@ namespace supervideo
                 com_ptr<IMF2DBuffer> b2 = buffer.try_as<IMF2DBuffer>();
                 if (b2 && SUCCEEDED(b2->Lock2D(&data, &pitch)))
                 {
-                    ctx->UpdateSubresource(in11[slot].get(), 0, nullptr, data, static_cast<UINT>(std::abs(pitch)), 0);
+                    ctx->UpdateSubresource(in11[slot].get(), 0, nullptr, data + LONG(cut_y) * pitch + LONG(cut_x) * 4, static_cast<UINT>(std::abs(pitch)), 0);
                     b2->Unlock2D();
                 }
                 else
                 {
                     DWORD length = 0;
                     if (FAILED(buffer->Lock(&data, nullptr, &length))) continue;
-                    ctx->UpdateSubresource(in11[slot].get(), 0, nullptr, data, w * 4, 0);
+                    // (Rows of the frame as stored - the shown part, cut out of it.)
+                    ctx->UpdateSubresource(in11[slot].get(), 0, nullptr, data + size_t(cut_y) * stored_row + size_t(cut_x) * 4, stored_row, 0);
                     buffer->Unlock();
                 }
             }
@@ -527,6 +608,18 @@ namespace supervideo
                 ID3D12Resource *outs[msmai::kMost] = {};
                 for (UINT k = 0; k + 1 < n && k < msmai::kMost; ++k) outs[k] = ai_out[k].get();
                 ID3D12GraphicsCommandList *l = list.get();
+                // (Round 88d: SMAI with SMFG's marks - for tests only here, SM_VIDEO_MARKS=1: a game's recording has its HUD.)
+                msmai::MarksAsk marks_ask;
+                MsmAsk marks_for = ask;
+                marks_for.marks = true;
+                if (video_marks)
+                {
+                    marks_ask.words = MsmNetWords(marks_ask.search_w, marks_ask.search_h, marks_ask.blocks_w, marks_ask.blocks_h);
+                    marks_ask.holds = MsmMarkHolds();
+                    marks_ask.make = [&](ID3D12GraphicsCommandList *ml) {
+                        return MsmMarksFromWords(ml, in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, marks_for);
+                    };
+                }
                 ai_made = msmai::Frames(l, in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, outs,
                                         D3D12_RESOURCE_STATE_COPY_SOURCE, n - 1, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
                                         [&] {
@@ -536,7 +629,7 @@ namespace supervideo
                                             queue->Signal(fence12.get(), ++fv);
                                             return true;
                                         },
-                                        [&] { open(); return true; });
+                                        [&] { open(); return true; }, nullptr, video_marks ? &marks_ask : nullptr);
                 // Each in turn: into the generator's picture, then to the encoder (the first in the list open now).
                 for (UINT k = 1; ai_made && k < n && !failed; ++k)
                 {
@@ -554,7 +647,29 @@ namespace supervideo
             if (have_before && n > 1 && span > 0 && !ai_made)
             {
                 open();
-                MsmPair(list.get(), in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, ask);
+                MsmAsk pair_ask = ask;
+                bool searched = false;      // (round 88b: SMFG's search sent before the network, the rest after)
+                if (ai_helps && !msmai::Failed())
+                {
+                    UINT search_w = 0, search_h = 0, blocks_w = 0, blocks_h = 0;
+                    ID3D12Resource *const words = MsmNetWords(search_w, search_h, blocks_w, blocks_h);
+                    ID3D12GraphicsCommandList *l = list.get();
+                    pair_ask.net = msmai::Words(l, in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, words, search_w, search_h,
+                                                blocks_w, blocks_h, w, h, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                [&] {
+                                                    if (FAILED(list->Close())) return false;
+                                                    ID3D12CommandList *lists[] = { list.get() };
+                                                    queue->ExecuteCommandLists(1, lists);
+                                                    queue->Signal(fence12.get(), ++fv);
+                                                    return true;
+                                                },
+                                                [&] { open(); return true; },
+                                                [&] { MsmPairSearch(list.get(), in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, pair_ask); },
+                                                searched);
+                    if (!pair_ask.net) msmai::Forget();
+                }
+                if (searched) MsmPairFinish(list.get(), in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, pair_ask);
+                else MsmPair(list.get(), in12[1 - slot].get(), in12[slot].get(), D3D12_RESOURCE_STATE_COMMON, pair_ask);
                 for (UINT k = 1; k < n && !failed; ++k)
                 {
                     if (k > 1) open();

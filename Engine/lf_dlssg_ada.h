@@ -11,7 +11,31 @@
 
 namespace lf_ada {
 struct Patch { BYTE *at; std::vector<BYTE> before, after; DWORD protection = 0; };
-struct Result { bool applied = false; unsigned containers = 0; };
+struct Result { bool applied = false; unsigned containers = 0; bool gate = false; };
+
+// Round 86, from MFG-Unlocker 1.7.0's Ada route (dashdogy, MIT; its ngx_mfg_gate): the runtime's frame-count validator
+// that sends a card it does not take for MFG to the "one frame only" check - `test dl,dl / je <cmp r8d,1> / mov esi,5`.
+// Its je becomes a short jump over the rest of the old displacement (EB 04), so the count goes on to the MFG path.
+// Taken only where it is exactly once in the image and the branch lands on that very test. Simulated on 310.9.16 with
+// tests\ada_sim.exe (one site, RVA 0x626D2): there is no RTX 40 here to run it on.
+inline BYTE *GateSite(BYTE *base, size_t size, const std::vector<IMAGE_SECTION_HEADER> &sections) {
+    const BYTE head[]={0x84,0xd2,0x0f,0x84}, tail[]={0xbe,5,0,0,0}, one[]={0x41,0x83,0xf8,1};
+    BYTE *found=nullptr;
+    for(const auto &s:sections) {
+        if(!(s.Characteristics & IMAGE_SCN_MEM_EXECUTE) || s.Misc.VirtualSize<13)continue;
+        BYTE *begin=base+s.VirtualAddress;
+        for(size_t i=0;i+13<=s.Misc.VirtualSize;++i) {
+            BYTE *p=begin+i;
+            if(memcmp(p,head,4) || memcmp(p+8,tail,5))continue;
+            int32_t rel=0; memcpy(&rel,p+4,sizeof(rel));
+            const int64_t target=int64_t(s.VirtualAddress)+int64_t(i)+8+rel;
+            if(target<0 || uint64_t(target)+sizeof(one)>size || memcmp(base+target,one,sizeof(one)))continue;
+            if(found)return nullptr;      // more than one: none is taken
+            found=p;
+        }
+    }
+    return found;
+}
 
 inline bool Range(size_t offset, size_t length, size_t size) { return offset <= size && length <= size - offset; }
 template<class T> inline T Read(const BYTE *p) { T v; memcpy(&v,p,sizeof(v)); return v; }
@@ -64,6 +88,8 @@ inline Result Apply(BYTE *base, size_t size, unsigned computeCapability) {
         Add(patches,advertise+7,&five,1);Add(patches,advertise+17,nop4,4);
         Add(patches,validate+5,nop2,2);Add(patches,validate+9,&five,1);
     }
+    // (Round 86: the count validator's gate, where it is - GateSite. Without it the patch stays as it was.)
+    if(BYTE *gate=GateSite(base,size,sections)) { const BYTE jump[]={0xeb,4}; Add(patches,gate+2,jump,sizeof(jump)); result.gate=true; }
     const BYTE magic[]={0x50,0xed,0x55,0xba};
     for(const auto &s:sections) {
         if(s.Characteristics & IMAGE_SCN_MEM_EXECUTE)continue;

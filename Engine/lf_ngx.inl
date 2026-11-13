@@ -155,7 +155,8 @@ static NVSDK_NGX_FeatureCommonInfo *NgxSearchInfo(const wchar_t *data_dir)
 
     char v[8] = {};
     const DWORD len = GetEnvironmentVariableA("LF_NGX_PATHLIST", v, sizeof(v));
-    if (len > 0 && len < sizeof(v) && v[0] == '1')
+    // (Round 85: and XeSS MFG on the tensor cores - the core finds the runtime beside the engine.)
+    if ((len > 0 && len < sizeof(v) && v[0] == '1') || g_xess_tensor)
     {
         wcscpy_s(lfNgxSearch.dirs[0], MAX_PATH, data_dir);
         wchar_t exe_dir[MAX_PATH] = {};

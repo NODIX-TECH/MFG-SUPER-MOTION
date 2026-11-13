@@ -301,6 +301,7 @@ static UINT64 CmdSubmit()
     }
     ID3D12CommandList *lists[] = { lfCore.cmd };
     lfCore.direct_queue->ExecuteCommandLists(1, lists);
+    ++g_pieces[0];
     const UINT64 v = ++lfCore.timeline_value;
 
     const HRESULT sig = lfCore.direct_queue->Signal(lfCore.timeline, v);
@@ -404,6 +405,7 @@ static bool CmdSubmitShow(DWORD timeout_ms)
     if (lfCap.sync12 != nullptr && lfCap.sync_value > 1) lfCore.show_queue->Wait(lfCap.sync12, lfCap.sync_value - 1);
     ID3D12CommandList *lists[] = { lfCore.cmd };
     lfCore.show_queue->ExecuteCommandLists(1, lists);
+    ++g_pieces[1];
     const bool signalled = SUCCEEDED(lfCore.show_queue->Signal(fence, ++value));
     SpoutAfter(lfCore.show_queue);
     lfProf.stage_now = GS_NONE;

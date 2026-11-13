@@ -98,9 +98,18 @@ static unsigned ApplyOption(const char *key, const char *value)
     }
     if (KeyIs(key, "queue"))        { if (set(smOpt.queue, 0, 2)) Trace("[option] Queue target %d", smOpt.queue.load()); return 0; }
     if (KeyIs(key, "still"))        { if (set(smOpt.still, 0, 1)) { Trace("[option] still pixels %s", number ? "kept" : "left to the generator"); return kRedoFg; } return 0; }
-    if (KeyIs(key, "screen_limit")) { if (set(smOpt.screen_limit, 0, 1)) Trace("[option] frames in between %s", number ? "fill what room the screen has" : "as the multiplier says, whatever the screen shows"); return 0; }
+    if (KeyIs(key, "screen_limit")) { if (set(smOpt.screen_limit, 0, 1)) Trace("[option] frames in between %s", number ? "limited to the screen's refresh, as a Frame limit at it (round 88r)" : "as the multiplier says, whatever the screen shows"); return 0; }
     if (KeyIs(key, "guard"))        { if (set(smOpt.guard, 0, 1)) Trace("[option] fast motion guard %s", number ? "on" : "off"); return 0; }
-    if (KeyIs(key, "msm_ai"))       { if (set(smOpt.msm_ai, 0, 1)) Trace("[option] SMFG AI %s", number ? "on" : "off"); return 0; }
+    if (KeyIs(key, "tri_pitch"))    { if (set(smOpt.tri_pitch, 4, 32)) Trace("[option] Triangle Mesh: a corner every %d pixels", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_rounds"))   { if (set(smOpt.tri_rounds, 1, 8)) Trace("[option] Triangle Mesh: %d rounds of the search a size", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_fine"))     { if (set(smOpt.tri_fine, 0, 4)) Trace("[option] Triangle Mesh: %d rounds between texels", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_full"))     { if (set(smOpt.tri_full, 0, 4)) Trace("[option] Triangle Mesh: %d rounds on the frames themselves", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_home"))     { if (set(smOpt.tri_home, 0, 16)) Trace("[option] Triangle Mesh: a corner is believed up to %d pixels from home", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_top"))      { if (set(smOpt.tri_top, 1, 4)) Trace("[option] Triangle Mesh: a pair starts at size %d", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_exact"))    { if (set(smOpt.tri_exact, 0, 6)) Trace("[option] Triangle Mesh: %d rounds to a part of a pixel", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "tri_relax"))    { if (set(smOpt.tri_relax, 0, 6)) Trace("[option] Triangle Mesh: %d rounds of relaxing", static_cast<int>(number)); return 0; }
+    if (KeyIs(key, "msm_tri"))      { if (set(smOpt.msm_tri, 0, 1)) Trace("[option] Triangle Mesh %s", number ? "on: SMFG's frames by a mesh of triangles (3DRS, the rasteriser); DLSS MFG and XeSS MFG are handed the motion its search reads" : "off"); return 0; }
+    if (KeyIs(key, "msm_ai"))       { if (set(smOpt.msm_ai, 0, 2)) Trace("[option] SMFG AI %s", number == 1 ? "on (SMFG Net)" : number == 2 ? "on (RIFE)" : "off"); return 0; }
     if (KeyIs(key, "msm_search"))   { if (set(smOpt.msm_search, 0, 1)) Trace("[option] MSM FG's search: %s", number ? "the lighter one" : "in full"); return 0; }
     if (KeyIs(key, "aml"))          { if (set(smOpt.aml, 0, 1)) Trace("[option] Adaptive Motion Learning %s", number ? "on" : "off"); return 0; }
     // (What it changes - the size frames in between are made at - the loop sees for itself: sm_loop.inl.)
@@ -152,6 +161,18 @@ static unsigned ApplyOption(const char *key, const char *value)
                   want ? "[adaptive] Adaptive MFG: %d frames a second, evenly" : "[adaptive] Adaptive MFG off", want);
         return 0;
     }
+    if (KeyIs(key, "xess_tensor"))  { set(smOpt.xess_tensor, 0, 1); return 0; }   // (read once, at the start: sm_engine.cpp)
+    if (KeyIs(key, "hud_ai"))       { if (set(smOpt.hud_ai, 0, 1)) Trace("[option] SMHUD (the HUD found by a network, kept as the real frame has it) %s", number ? "on" : "off"); return 0; }
+    if (KeyIs(key, "fixed_beat")) { if (set(smOpt.fixed_beat, 0, 1)) Trace("[option] a fixed multiplier: %s", number ? "at an even beat of its own" : "its count in each pair"); return 0; }
+    if (KeyIs(key, "fit"))          { if (set(smOpt.fit, 0, 1)) Trace("[option] fit to a fixed refresh %s", number ? "on" : "off"); return 0; }
+    if (KeyIs(key, "smooth")) { if (set(smOpt.smooth, 0, 1)) Trace("[option] Ultra Smooth %s", number ? "on: an even beat, and a frame's time more delay kept in hand for the frames that come late" : "off"); return 0; }
+    if (KeyIs(key, "ratio"))
+    {
+        const int want = (number < 11 || number > 60) ? 0 : static_cast<int>(number);
+        if (smOpt.ratio.exchange(want) != want)
+            Trace(want ? "[adaptive] multiplier x%d.%d: the game's own rate times it, evenly" : "[adaptive] decimal multiplier off", want / 10, want % 10);
+        return 0;
+    }
     if (KeyIs(key, "vrr"))          { if (set(smOpt.vrr, 0, 1)) Trace("[option] VRR %s", number ? "on" : "off"); return 0; }
     if (KeyIs(key, "sync"))
     {
@@ -165,16 +186,22 @@ static unsigned ApplyOption(const char *key, const char *value)
     if (KeyIs(key, "low_latency"))  { if (set(smOpt.low_latency, 0, 1)) { Trace("[option] Low Latency %s", number ? "on" : "off"); return kRedoWindow; } return 0; }
     if (KeyIs(key, "hdr"))          { if (set(smOpt.hdr, 0, 1)) { Trace("[option] HDR %s", number ? "on" : "off"); return kRedoSource; } return 0; }
     if (KeyIs(key, "gpu_class"))    { if (set(smOpt.gpu_class, 0, 1)) Trace("[option] GPU priority %s", number ? "realtime" : "normal"); return 0; }
-    if (KeyIs(key, "counter"))      { set(smOpt.counter, 0, 1); return 0; }
+    if (KeyIs(key, "counter"))      { set(smOpt.counter, 0, 2); return 0; }   // (round 84: 2 with the frame time line)
+    if (KeyIs(key, "bloom"))        { set(smOpt.bloom, 0, 100); return 0; }        // (round 86, lf_bloom.inl)
+    if (KeyIs(key, "bloom_wide"))   { set(smOpt.bloom_wide, 0, 100); return 0; }
+    if (KeyIs(key, "counter_size")) { set(smOpt.counter_size, 50, 200); return 0; }   // (round 85, GitHub 71)
     if (KeyIs(key, "spout"))        { if (set(smOpt.spout, 0, 1) && number) Trace("[option] Spout output on"); return 0; }
     if (KeyIs(key, "link"))         { set(smOpt.link, 0, 1); return 0; }
     if (KeyIs(key, "upscaler"))
     {
-        static const char *const names[] = { "off", "sharpening only", "integer", "nearest neighbour", "Anime4K" };
-        if (set(smOpt.upscaler, 0, 4)) Trace("[option] upscaler: %s", names[smOpt.upscaler.load()]);
-        return 0;
+        static const char *const names[] = { "off", "sharpening only", "integer", "nearest neighbour", "Anime4K", "SMSR 1.0" };
+        const bool was = smOpt.upscaler.load() == 5;
+        if (set(smOpt.upscaler, 0, 5)) Trace("[option] upscaler: %s", names[smOpt.upscaler.load()]);
+        // (Round 88l: SMSR enlarges the picture as it is taken - to or from it, the picture's size changes.)
+        return was != (smOpt.upscaler.load() == 5) ? kRedoPipeline : 0;
     }
     if (KeyIs(key, "sharpness"))      { set(smOpt.sharpness, 0, 100); return 0; }
+    if (KeyIs(key, "smsr_strength"))  { if (set(smOpt.smsr_strength, 0, 200)) Trace("[option] SMSR strength %d%%", smOpt.smsr_strength.load()); return 0; }
     if (KeyIs(key, "over_sharpness")) { set(smOpt.over_sharpness, 0, 100); return 0; }
     if (KeyIs(key, "capture_api"))  { if (set(smOpt.capture_api, 0, 1)) { Trace("[option] capture API %s", number ? "WGC" : "DXGI"); return kRedoSource; } return 0; }
     if (KeyIs(key, "motion"))

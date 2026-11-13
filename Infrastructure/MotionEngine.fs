@@ -129,6 +129,45 @@ type MotionEngine() =
     let mutable cards: CardInfo array = [||]
     // Lines for the engine that are not a profile's: what it writes on the frame, in the app's language.
     let mutable texts: (string * string) list = []
+    // Round 72, App Mods: every line the engine writes, for the mods; and lines a mod puts in the start file.
+    let line = Event<string>()
+    let mutable extras: (string * string) list = []
+    // Round 73, Linux: there is no engine program - the engine is the Vulkan layer in the game (LinuxLayer). START
+    // writes it on, STOP off, an option moved is written at once (the layer reads its settings every second), and
+    // what it says is read each second while it is on.
+    let linux = OperatingSystem.IsLinux()
+    let mutable linuxOn = false
+    let mutable linuxTimer: Timer = null
+    let mutable linuxOptions = Preferences.defaultOptions
+    let linuxSettings (options: DisplayOptions) on : LinuxSettings =
+        { Enabled = on && options.FrameGeneration
+          Multiplier = (if options.FrameGeneration then options.Mode + 2 else 1)
+          Flow = max 25 (Preferences.effectiveFlow options)
+          Fast = options.MsmSearch = 1
+          Adaptive = options.Adaptive
+          Target = (if options.AdaptiveFps >= 30 then options.AdaptiveFps else LinuxLayer.screenRate.Value)
+          // (Round 74: Adaptive Motion Learning on Linux too - the Windows engine's own, in the layer.)
+          Aml = options.AdaptiveLearning
+          AmlFlow = options.AdaptiveFlow
+          Game = options.GameType
+          // (Round 88n: SMSR 1.0 in play - "Upscaler" SMSR, while the layer is on; with frame generation off too.)
+          Smsr = on && options.Upscaler = 5
+          SmsrStrength = 100 + options.SmsrBoost
+          // (Round 101: "Triangle Mesh" - the layer's SMFG frames by a mesh of triangles.)
+          Tri = options.TriangleMesh
+          // (Round 114: and SMT's own numbers from its gear, as the Windows engine gets them.)
+          TriPitch = Preferences.triValue Preferences.triPitches 0 options.TriPitch
+          TriRounds = Preferences.triValue Preferences.triRounds 1 options.TriRounds
+          TriFine = Preferences.triValue Preferences.triFines 2 options.TriFine
+          TriFull = Preferences.triValue Preferences.triFulls 3 options.TriFull
+          TriHome = Preferences.triValue Preferences.triHomes 4 options.TriHome
+          TriTop = Preferences.triValue Preferences.triRanges 5 options.TriRange
+          TriExact = Preferences.triValue Preferences.triExacts 6 options.TriExact
+          TriRelax = Preferences.triValue Preferences.triRelaxes 7 options.TriRelax }
+    // (An app closed without stopping last time left the layer on: it starts off, as START MOTION shows.)
+    do if linux && File.Exists LinuxLayer.configFile then
+        let left = LinuxLayer.readSettings ()
+        if left.Enabled then LinuxLayer.writeSettings { left with Enabled = false } |> ignore
 
     // Where the engine is just now (EngineStore: beside the program in a build folder, downloaded otherwise).
     let enginePath () =
@@ -154,23 +193,45 @@ type MotionEngine() =
         let flag value = if value then "1" else "0"
         // The card picked ("Preferred GPU"), when it is there and the generator can run on it; else the engine picks.
         let card =
-            cards |> Array.tryFind (fun c -> c.Name = options.Gpu && (match options.Generator with | 1 -> c.Xess | 2 -> true | _ -> c.Dlss))
+            cards |> Array.tryFind (fun c -> c.Name = options.Gpu && (match options.Generator with | 1 -> c.Xess | 2 | 3 -> true | _ -> c.Dlss))
                   |> Option.map _.Index |> Option.defaultValue -1
-        [ "generator", string options.Generator
+        // (Round 88c: SMAI is the engine's MSM path - generator 2 - with SMFG Net making the frames: msm_ai 1.)
+        [ "generator", string (if options.Generator = 3 then 2 else options.Generator)
+          // (Round 85: XeSS MFG on the tensor cores - the engine takes it on an RTX 20/30 only, at its start.)
+          "xess_tensor", flag options.XessTensor
+          // (Round 90: SMHUD - "hud_ai" - put aside at the owner's word, 2026-11-09: not sent; the engine keeps it off.)
           "gpu", string card
           "mfg", flag options.FrameGeneration
           // (Round 54, Mode "Adaptive": the frames shown at an even beat, as many as the target asks; the most between
           // two real frames is x6's.)
-          "multiplier", string (if options.Adaptive then 6 else options.Mode + 2)
+          // (x2.5 and the like go by the beat as Adaptive does: the generator is made for x6's most, the beat takes what it needs.)
+          "multiplier", string (if options.Adaptive || Preferences.multiplierTenths options % 10 <> 0 then 6 else Preferences.multiplierTenths options / 10)
+          // (Round 85, GitHub 73: x2.5 and the like - the game's own rate times it, evenly; 0 a whole multiplier.)
+          "ratio", (let tenths = Preferences.multiplierTenths options in if options.Adaptive || tenths % 10 = 0 then "0" else string tenths)
           "adaptive", (if not options.Adaptive then "0" elif options.AdaptiveFps >= 30 then string options.AdaptiveFps else "1")
           "flow", string (max 25 options.Flow)
           "game", string options.GameType
           "queue", string options.QueueTarget
           "still", flag options.StillPixels
+          "fixed_beat", flag (not options.PairPacing)
+          // (Round 96: "Ultra Smooth" - Even pacing and a frame's time more delay kept in hand; the engine's `smooth`.)
+          "smooth", flag options.UltraSmooth
+          // (Round 99: "Triangle Mesh" - SMFG's frames by msm_tri.h; the engine's `msm_tri`.)
+          // (1.1.0, "SMT": with SMFG its own switch, with DLSS MFG / XeSS MFG another - on for SMFG to begin with, off for them.)
+          "msm_tri", flag (match options.Generator with | 2 -> options.TriangleMesh | 0 | 1 -> options.SmtAssist | _ -> false)
+          "tri_pitch", string (Preferences.triValue Preferences.triPitches 0 options.TriPitch)
+          "tri_rounds", string (Preferences.triValue Preferences.triRounds 1 options.TriRounds)
+          "tri_fine", string (Preferences.triValue Preferences.triFines 2 options.TriFine)
+          "tri_full", string (Preferences.triValue Preferences.triFulls 3 options.TriFull)
+          "tri_home", string (Preferences.triValue Preferences.triHomes 4 options.TriHome)
+          "tri_top", string (Preferences.triValue Preferences.triRanges 5 options.TriRange)
+          "tri_exact", string (Preferences.triValue Preferences.triExacts 6 options.TriExact)
+          "tri_relax", string (Preferences.triValue Preferences.triRelaxes 7 options.TriRelax)
           "guard", "0"
           "msm_search", string options.MsmSearch
           "aml", flag options.AdaptiveLearning
           "aml_flow", flag options.AdaptiveFlow
+          "aml_guide", flag (not options.AmlGuideOff)
           "dlssg_preset", string ([| 0; 3; 2; 1 |][Math.Clamp(options.DlssPreset, 0, 3)])
           "frame_limit", string options.FrameLimit
           "game_fps", string options.GameFps
@@ -185,23 +246,32 @@ type MotionEngine() =
           "cursor_scale", flag options.CursorScale
           "screen_limit", flag options.LimitToScreen
           "vrr", flag options.Vrr
+          "lock", flag options.LockRefresh
           "sync", string options.SyncMode
           "low_latency", flag options.LowLatency
-          // (SMFG AI, round 52: too heavy as it is - its switch is not shown, and it is never asked for.)
-          "msm_ai", "0"
+          // (Round 88c: SMAI, a generator of its own - the old switch under SMFG is gone; SMFG never asks for the network.)
+          "msm_ai", flag (options.Generator = 3)
           "hdr", flag options.Hdr
           "gpu_class", (if options.GpuPriority = 0 then "1" else "0")
-          "counter", flag options.FpsCounter
+          // (Round 79: 2 the counter with its frame time line.)
+          "counter", (if not options.FpsCounter then "0" elif options.FpsCounterAdvanced then "2" else "1")
+          // (Round 85, GitHub 71: its size, percent.)
+          "counter_size", string options.FpsCounterSize
           "spout", flag options.Spout
           "upscaler", string options.Upscaler
+          "smsr_strength", string (100 + options.SmsrBoost)
           "sharpness", string options.Sharpness
+          // (Round 86: Bloom on the real frames, before any generator reads them - lf_bloom.inl.)
+          "bloom", string options.Bloom
+          "bloom_wide", string options.BloomWide
           "over_sharpness", string options.OverSharpness
+          "stretch", flag options.Stretch
           "capture_api", string options.CaptureApi
           // The engine's numbers: 2 the generator's own, 0 NVIDIA Optical Flow, 1 the GPU estimate.
           // (MSM FG finds the motion itself: it is what it is.)
           "motion", (match options.Generator with
                      | 1 -> (match options.XessMotionSource with | 1 -> "1" | 2 -> "0" | _ -> "2")
-                     | 2 -> "2"
+                     | 2 | 3 -> "2"
                      | _ -> (match options.MotionSource with | 1 -> "0" | 2 -> "1" | _ -> "2"))
           "window_mode", string options.WindowMode
           "delay", string Preferences.countdowns[options.Countdown] ]
@@ -211,7 +281,9 @@ type MotionEngine() =
         | true, value -> value
         | _ -> -1
 
-    let onLine (line: string) =
+    let onLine (text: string) =
+        (try line.Trigger text with _ -> ())
+        let line = text
         if not (String.IsNullOrEmpty line) && line[0] = '@' then
             let parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             match parts[0] with
@@ -242,6 +314,32 @@ type MotionEngine() =
             | "@error" when parts.Length > 1 -> update (fun s -> if s.Error = "" then { s with Error = parts[1] } else s)
             | _ -> ()
 
+    // Linux: what the layer said this last second (a game running with it), as the engine's lines would say it - for
+    // the page, and for the mods ("@fps <game> <shown>").
+    let linuxPoll () =
+        match LinuxLayer.readStatus () with
+        | Some said ->
+            let size = said.Size.Split('x')
+            let side i = if size.Length = 2 then max 0 (number size[i]) else 0
+            let options = lock gate (fun () -> linuxOptions)
+            // ("learning 40", "learned 100 50", "off": as the Windows engine's @aml line.)
+            let aml = said.Aml.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            let learning = if aml.Length >= 1 && aml[0] = "learned" then 101 elif aml.Length >= 2 && aml[0] = "learning" then Math.Clamp(number aml[1], 0, 100) else -1
+            update (fun s -> { s with Phase = Running; BaseFps = said.GameFps; OutputFps = said.ShownFps; Width = side 0; Height = side 1; Api = "Vulkan"
+                                      Multiplier = (if not said.Working then 0 elif options.Adaptive then 6 else options.Mode + 2); Learning = learning })
+            (try line.Trigger(sprintf "@fps %d %d" said.GameFps said.ShownFps) with _ -> ())
+        | None -> update (fun s -> { s with BaseFps = -1; OutputFps = -1; Width = 0; Height = 0 })
+
+    let linuxStop () =
+        let timer = lock gate (fun () ->
+            let t = linuxTimer
+            linuxTimer <- null
+            linuxOn <- false
+            t)
+        if not (isNull timer) then timer.Dispose()
+        LinuxLayer.writeSettings (linuxSettings (lock gate (fun () -> linuxOptions)) false) |> ignore
+        publish EngineStatus.idle
+
     let onExit (ended: Process) =
         let mine = lock gate (fun () ->
             if obj.ReferenceEquals(ended, proc) then
@@ -262,17 +360,30 @@ type MotionEngine() =
 
     member _.Changed = changed.Publish
     member _.Status = lock gate (fun () -> status)
-    member _.IsActive = lock gate (fun () -> not (isNull proc))
-    member _.IsInstalled = File.Exists (enginePath ())
+    member _.IsActive = lock gate (fun () -> if linux then linuxOn else not (isNull proc))
+    member _.IsInstalled = if linux then LinuxLayer.isShipped () || LinuxLayer.isInstalled () else File.Exists (enginePath ())
     member _.LogPath = Path.Combine(dataFolder, "engine.log")
     /// What the engine writes on the frame (its start file's "aml_say0" .. lines): taken at the next start.
     member _.SetTexts(lines: (string * string) list) = lock gate (fun () -> texts <- lines)
     /// Whether the engine keeps its log (Settings, off): taken at the next start.
     member _.SetLog(on: bool) = lock gate (fun () -> keepLog <- on)
+    /// Every line the engine writes (round 72, App Mods) - raised on the thread that reads them.
+    member _.Line = line.Publish
+    /// A mod's lines for the start file, after the app's own: taken at the next start.
+    member _.SetExtras(lines: (string * string) list) = lock gate (fun () -> extras <- lines)
+    /// One option for the running engine now, as its start file has them; nothing when it is not running.
+    member _.SendLine(key: string, value: string) =
+        let running = lock gate (fun () -> proc)
+        if not (isNull running) then
+            try
+                let one (s: string) = if isNull s then "" else s.Replace('\n', ' ').Replace('\r', ' ')
+                running.StandardInput.WriteLine((one key).Replace('=', ' ') + "=" + one value)
+                running.StandardInput.Flush()
+            with :? IOException | :? InvalidOperationException | :? ObjectDisposedException -> ()
 
     /// The graphics cards of this machine as the engine sees them (asked once; empty when it cannot be asked).
     member _.Cards() =
-        if cards.Length = 0 && File.Exists (enginePath ()) then
+        if not linux && cards.Length = 0 && File.Exists (enginePath ()) then
             try
                 let info =
                     ProcessStartInfo(
@@ -315,7 +426,7 @@ type MotionEngine() =
     /// Is VRR on for a window on this PC (Engine/lf_vrr.inl, "--vrr"): Some true / Some false, None when it
     /// cannot be told (or the engine does not know the question).
     member _.SystemVrr() =
-        if not (File.Exists (enginePath ())) then None
+        if linux || not (File.Exists (enginePath ())) then None
         else
             try
                 let info =
@@ -351,7 +462,24 @@ type MotionEngine() =
     /// Start the engine for a profile. False when it cannot be started at all.
     /// now: the window in front is taken at once, no countdown (started by the shortcut in a game).
     member this.Start(options: DisplayOptions, now: bool) =
-        if this.IsActive then true
+        if linux then
+            if this.IsActive then true
+            else
+                // (Installed, or brought up to the app's own, at the first START.)
+                let ready = if LinuxLayer.isInstalled () && not (LinuxLayer.isOutdated ()) then Ok () else LinuxLayer.install ()
+                match ready with
+                | Error _ ->
+                    publish { EngineStatus.idle with Error = "missing" }
+                    false
+                | Ok () ->
+                    lock gate (fun () -> linuxOptions <- options)
+                    LinuxLayer.writeSettings (linuxSettings options true) |> ignore
+                    publish { EngineStatus.idle with Phase = Running; Api = "Vulkan" }
+                    lock gate (fun () ->
+                        linuxOn <- true
+                        linuxTimer <- new Timer((fun _ -> linuxPoll ()), null, 0, 1000))
+                    true
+        elif this.IsActive then true
         elif not (File.Exists (enginePath ())) then
             publish { EngineStatus.idle with Error = "missing" }
             false
@@ -363,7 +491,8 @@ type MotionEngine() =
                 let text = StringBuilder()
                 for key, value in lines do text.Append(key).Append('=').AppendLine(value) |> ignore
                 // (One line each, and no '#': the engine takes what follows one for a remark.)
-                for key, value in lock gate (fun () -> texts) do
+                // (Round 72: a mod's own lines after the app's - the engine takes the last of one key.)
+                for key, value in lock gate (fun () -> texts @ extras) do
                     text.Append(key).Append('=').AppendLine(value.Replace('\n', ' ').Replace('\r', ' ').Replace('#', ' ')) |> ignore
                 text.Append("log=").AppendLine(if lock gate (fun () -> keepLog) then "1" else "0") |> ignore
 #if DEBUG
@@ -401,20 +530,25 @@ type MotionEngine() =
 
     /// Send the controls that moved since the last time.
     member _.Send(options: DisplayOptions) =
-        let running, changes =
-            lock gate (fun () ->
-                if isNull proc then null, []
-                else
-                    let lines = optionLines options
-                    let before = dict sent
-                    let changes = lines |> List.filter (fun (key, value) -> not (before.ContainsKey key) || before[key] <> value)
-                    sent <- lines
-                    proc, changes)
-        if not (isNull running) && not changes.IsEmpty then
-            try
-                for key, value in changes do running.StandardInput.WriteLine(key + "=" + value)
-                running.StandardInput.Flush()
-            with :? IOException | :? InvalidOperationException | :? ObjectDisposedException -> ()
+        if linux then
+            if lock gate (fun () -> linuxOn) then
+                lock gate (fun () -> linuxOptions <- options)
+                LinuxLayer.writeSettings (linuxSettings options true) |> ignore
+        else
+            let running, changes =
+                lock gate (fun () ->
+                    if isNull proc then null, []
+                    else
+                        let lines = optionLines options
+                        let before = dict sent
+                        let changes = lines |> List.filter (fun (key, value) -> not (before.ContainsKey key) || before[key] <> value)
+                        sent <- lines
+                        proc, changes)
+            if not (isNull running) && not changes.IsEmpty then
+                try
+                    for key, value in changes do running.StandardInput.WriteLine(key + "=" + value)
+                    running.StandardInput.Flush()
+                with :? IOException | :? InvalidOperationException | :? ObjectDisposedException -> ()
 
     /// What was learnt for a game is deleted: an engine that is playing that game starts it from nothing.
     member _.Forget(game: string) =
@@ -449,10 +583,39 @@ type MotionEngine() =
                 if not (asking.WaitForExit 5000) then (try asking.Kill() with _ -> ())
             with _ -> ()
 
+    /// Round 84: the engine's shaders made for this PC once after each update ("--warm-shaders"), so the first
+    /// SMFG start does not stand some 13 s compiling them. True when it is still to be done for this engine.
+    member _.ShadersNeedWarm() =
+        not linux && File.Exists (enginePath ()) &&
+        (let info = FileInfo (enginePath ())
+         not (File.Exists (Path.Combine(dataFolder, sprintf "shaders-%d-%d.ready" info.Length info.LastWriteTimeUtc.Ticks))))
+
+    /// Round 84: the shaders made (two minutes at most); the mark written when it went through.
+    member _.WarmShaders() =
+        try
+            let info = FileInfo (enginePath ())
+            let start =
+                ProcessStartInfo(
+                    FileName = (enginePath ()),
+                    Arguments = "--warm-shaders",
+                    WorkingDirectory = Path.GetDirectoryName (enginePath ()),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true)
+            use warming = Process.Start start
+            let said = warming.StandardOutput.ReadToEndAsync()
+            // (An engine that does not know the question would start for real: it is ended.)
+            if not (warming.WaitForExit 120000) then (try warming.Kill() with _ -> ())
+            elif warming.ExitCode = 0 && said.Result.StartsWith "warm " then
+                Directory.CreateDirectory dataFolder |> ignore
+                File.WriteAllText(Path.Combine(dataFolder, sprintf "shaders-%d-%d.ready" info.Length info.LastWriteTimeUtc.Ticks), said.Result)
+        with _ -> ()
+
     /// Ask the engine to stop; it puts the game's window back as it was.
     member _.Stop() =
         let running = lock gate (fun () -> proc)
-        if not (isNull running) then
+        if linux then (if lock gate (fun () -> linuxOn) then linuxStop ())
+        elif not (isNull running) then
             stopping <- true
             try
                 running.StandardInput.WriteLine "stop"
@@ -473,7 +636,8 @@ type MotionEngine() =
     interface IDisposable with
         member this.Dispose() =
             let running = lock gate (fun () -> proc)
-            if not (isNull running) then
+            if linux then (if lock gate (fun () -> linuxOn) then linuxStop ())
+            elif not (isNull running) then
                 stopping <- true
                 try
                     running.StandardInput.WriteLine "stop"
@@ -491,9 +655,11 @@ module ScreenRate =
     extern int GetDeviceCaps(nativeint dc, int index)
 
     let primary () =
-        try
-            let dc = GetDC 0n
-            let rate = GetDeviceCaps(dc, 116)       // VREFRESH
-            ReleaseDC(0n, dc) |> ignore
-            if rate >= 30 && rate <= 1000 then rate else 60
-        with _ -> 60
+        if OperatingSystem.IsLinux() then LinuxLayer.screenRate.Value
+        else
+            try
+                let dc = GetDC 0n
+                let rate = GetDeviceCaps(dc, 116)       // VREFRESH
+                ReleaseDC(0n, dc) |> ignore
+                if rate >= 30 && rate <= 1000 then rate else 60
+            with _ -> 60

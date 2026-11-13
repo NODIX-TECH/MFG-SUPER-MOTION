@@ -6,13 +6,24 @@ The native process behind START MOTION. C++ only (no Python): it takes the game'
 
 It is the "DLSS MFG for every RTX card" architecture of LIVE FLOW in DLSS 5 MANAGER, moved here whole. What the old app's Python engine did around the worker (picking the window, borderless, the frame loop, settings) is C++ here (`sm_*`). The DLSS 5 colour network, FLOW MFG, Flow Super Resolution, recording and Spout were not brought over.
 
-## Build
+## Build, test, install (round 85: one source, one way in)
+
+The engine's source is **this folder and nothing else**. Before round 85 the source in use lived in copies under `work\` (`v103q-src` and others) while this folder held round 82's - the old copies are in `archive\` now, for reading only. A change is made here, never in a copy.
 
 ```cmd
-Engine\build.cmd
+Engine\build.cmd                  rem into work\build
+Engine\build.cmd work\r86-out     rem or a folder of the round
 ```
 
-Needs Visual Studio 2022 with the C++ workload. It makes `Engine\out\nvngx.dll` and copies the runtimes beside it; the app's build copies `Engine\out` to `<app>\Engine`. `nvngx.dll` is an executable: NGX's runtimes check that file name of their caller.
+Needs Visual Studio 2022 with the C++ workload. `nvngx.dll` is an executable: NGX's runtimes check that file name of their caller. `build.cmd` never writes over the engine in `out\` (FIX PACING.md, rule 3).
+
+Then, in this order:
+
+1. `tests\pacing-gate.ps1 -Engine work\build\nvngx.dll` on the real game (FIX PACING.md, section 2). A whole PASS writes the engine's hash into `tests\gate-passed.txt`.
+2. `tests\smoke-all.ps1 -Engine work\build\nvngx.dll -Out <file>`: 51 of 51.
+3. `install-engine.ps1 -From work\build` copies it into `out\` and the app's Debug folder - only an engine with a PASS (or `-OwnerWord '<what the owner said>'`, written down). The engine that was there is kept in `archive\installed\<date>`; `install-engine.ps1 -Back` puts it back.
+
+The app's build copies `out\` to `<app>\Engine`.
 
 ## Files
 
@@ -42,6 +53,7 @@ Needs Visual Studio 2022 with the C++ workload. It makes `Engine\out\nvngx.dll` 
 | `sm_rebuild.inl` | frames in between made small (Flow) and rebuilt at the picture's size from the two real frames around them. Once a pair: the movement under which the two real frames show the same thing, block by block and pixel by pixel; what they agree about is built from them alone, the generator keeps its say where they do not |
 | `lf_fg_scale.inl` | the real frame scaled down for the generator; a small frame in between plainly scaled back when it cannot be rebuilt |
 | `lf_fg_still.inl` | what does not move stays put |
+| `sm_hud.h` | SMHUD (round 90, `hud_ai`): the game's HUD found by a network once a pair; each frame in between shows it as the real frame has it, whichever generator made it |
 | `lf_show.inl` | the output window and its swap chain |
 | `lf_window_fill.inl` | a window that keeps its size, scaled onto its whole screen; the sharpening ("Upscaling" in the app) |
 | `lf_vrr.inl`, `lf_latency.inl`, `lf_hdr_*`, `lf_counter.inl` | VRR, Low Latency and the scheduling class, HDR, the FPS counter |
@@ -74,6 +86,10 @@ Sent as `key=value`: in the start file (`--config <file>`), on the command line,
 | `queue` | 0 least delay, 1 balanced, 2 smoothest | yes |
 | `still` | 0, 1: keep still pixels | yes |
 | `guard` | 1: no frames in between while the picture moves faster than they follow; 0 (default): they are made all the same | yes |
+| `hud_ai` | 1: SMHUD (round 90, `sm_hud.h`) - a small network (`ai\smhud.onnx`, learnt in `ai learning\smhud`) finds the game's HUD once a pair, at half the picture's size (540 lines at most) through DirectML, and every frame in between shows it as the real frame nearer to it has it - drawn over the back buffer when the rebuild draws straight onto it, in place on the presenter's target otherwise - with every generator; 0 (default): off. A stand-in game filling an RTX 3060 at 2560x1440, x3: 62-63 FPS -> 59. `SM_HUD_SHOW=1` paints what it keeps red, `SM_HUD_NOSHOW=1` runs the network without using its maps (tests) | yes |
+| `fixed_beat` | 1: "Even pacing" (round 58, lost with the return to 1.0.3 in round 83, back in round 95) - the frame clock follows the capture's stamps a tenth of the way at most and a frame up to a whole frame late keeps the beat; over a limit (Frame limit, Limit to refresh rate, VRR's) SMFG goes by the limit's own even beat, each frame made for its own moment, and DLSS MFG / XeSS MFG get the largest whole count that fits; 0 (default): the multiplier's count in each pair as the stamps say, the pairs taking turns over a limit. `SM_CLOCK_HOLD=<percent>`, `SM_BEAT_PLAIN=1` to compare | yes |
+| `smooth` | 1: "Ultra Smooth" (round 96) - Even pacing, and the delay is what a pair usually asks plus one frame of the game's kept in hand (8 - 50 ms; `SM_SMOOTH_BUFFER=<percent of a frame>`): a frame that comes late by less is shown on the beat, a pair later than that is not made up but leaves the delay where it put it. The triangles, x3 at 40 FPS: 51 ms behind the game for 35, a 60 ms hitch a hold of 2.5 beats for 6 - 11; 0 (default): the least delay | yes |
+| `msm_tri` | 1: "Triangle Mesh" (round 99, the owner's; `msm_tri.h`) - SMFG's frames in between made another way: the motion of a mesh's corners (one every 16 pixels) found by 3DRS, the mesh cut where things move apart, drawn by the card's rasteriser. Not with SMAI. `SM_TRI_PITCH`, `SM_TRI_ROUNDS`, `SM_TRI_HOME` for tests. |
 | `frame_limit` | 0 off, 20..360 | yes |
 | `screen_limit` | 0 (default): every pair gets the multiplier's own count; 1: only as many frames in between as fill the screen, a whole number a pair | yes |
 | `vrr`, `low_latency`, `hdr`, `counter` | 0, 1 | yes |

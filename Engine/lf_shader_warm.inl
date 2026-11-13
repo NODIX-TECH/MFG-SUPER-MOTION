@@ -43,6 +43,11 @@ static void ShaderWarmStart()
     add(kUpscaleHlsl, sizeof(kUpscaleHlsl) - 1, "upscale.hlsl", "SharpMain", o3);
     add(kUpscaleHlsl, sizeof(kUpscaleHlsl) - 1, "upscale.hlsl", "AnimePushMain", o3);
     add(kUpscaleHlsl, sizeof(kUpscaleHlsl) - 1, "upscale.hlsl", "AnimeGradMain", o3);
+    // (Round 88k: SMSR 1.0's five passes when it is the Upscaler - about ten seconds the first time, a frozen picture
+    // were they compiled at its first frame.)
+    if (smOpt.upscaler.load() == 5)
+        for (const char *entry : { "SmsrBody0Main", "SmsrBody1Main", "SmsrBody2Main", "SmsrTailMain", "SmsrHeadMain" })
+            add(kSmsrHlsl, sizeof(kSmsrHlsl) - 1, "smsr.hlsl", entry, o3);
     add(kHdrInHlsl, sizeof(kHdrInHlsl) - 1, "lf-order.hlsl", "CSMain", 0);
     add(kLumaHlsl, sizeof(kLumaHlsl) - 1, "lf-luma.hlsl", "CSMain", 0);
     if (!MsmSelected()) add(kOfaGrow, sizeof(kOfaGrow) - 1, nullptr, "CSMain", o3);
@@ -93,4 +98,41 @@ static void ShaderWarmStart()
             left->fetch_sub(1);
         }
     }
+}
+
+// Round 84, "--warm-shaders" (the app, once after each update, on a thread of its own): every shader of every generator
+// compiled into the cache now and the engine gone - SMFG's took some 13 s the first time it was asked for, and the
+// owner's word was that the person must not take that for the app not working. Returns the count; the app shows a
+// line while it runs.
+static int ShaderWarmAll()
+{
+    std::vector<ShaderJob> jobs;
+    const UINT o3 = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    for (const char *entry : { "SearchMain", "RefineMain", "RelaxMain", "FarMain", "SubpelMain", "FillMain", "MarkMain", "SplatMain", "ResolveMain", "EdgeMain",
+                                "WarpMain", "LumaMain", "HalveMain", "ClearMain" })
+        jobs.push_back({ kMsmHlsl, sizeof(kMsmHlsl) - 1, "msm-fg.hlsl", entry, o3 });
+    for (const char *entry : { "FlowCheck", "FlowRefine", "FlowFinal", "FlowCoarse", "FlowSpread", "EstHalf", "EstBase" })
+        jobs.push_back({ kFlowEstimateHlsl, sizeof(kFlowEstimateHlsl) - 1, "flow_estimate.hlsl", entry, o3 });
+    for (const char *entry : { "ScaleMain", "SharpMain", "AnimePushMain", "AnimeGradMain" })
+        jobs.push_back({ kUpscaleHlsl, sizeof(kUpscaleHlsl) - 1, "upscale.hlsl", entry, o3 });
+    jobs.push_back({ kHdrInHlsl, sizeof(kHdrInHlsl) - 1, "lf-order.hlsl", "CSMain", 0 });
+    jobs.push_back({ kLumaHlsl, sizeof(kLumaHlsl) - 1, "lf-luma.hlsl", "CSMain", 0 });
+    jobs.push_back({ kOfaGrow, sizeof(kOfaGrow) - 1, nullptr, "CSMain", o3 });
+    jobs.push_back({ kHdrOutHlsl, sizeof(kHdrOutHlsl) - 1, "lf-hdr-out", "CSMain", 0 });
+    std::atomic<size_t> next{0};
+    const unsigned threads = std::clamp(std::max(1u, std::thread::hardware_concurrency()) / 2, 1u, 6u);
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < threads; ++t)
+        pool.emplace_back([&] {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            for (size_t at; (at = next.fetch_add(1)) < jobs.size();)
+            {
+                ID3DBlob *code = nullptr, *errors = nullptr;
+                CachedCompile(jobs[at].source, jobs[at].size, jobs[at].name, nullptr, nullptr, jobs[at].entry, "cs_5_0", jobs[at].flags, 0, &code, &errors);
+                if (code) code->Release();
+                if (errors) errors->Release();
+            }
+        });
+    for (auto &t : pool) t.join();
+    return static_cast<int>(jobs.size());
 }

@@ -431,6 +431,42 @@ static bool WindowClientOnMonitor(HWND hwnd, RECT &crop, HMONITOR &monitor)
         crop.bottom <= mi.rcMonitor.bottom - mi.rcMonitor.top;
 }
 
+// 1.1.0 (GitHub 87, the community's Windows 10 fix - merged here instead of patching this file's bytes): before build
+// 20348 Graphics Capture cannot leave out its yellow border (IsBorderRequired is not there), and its frames come on a
+// 40 / 60 ms beat of its own. There a window that is not its whole screen - windowed, or scaled onto it - is taken by
+// DXGI cut down to the window's client area instead. Only from build 19041 on (Windows 10 2004): before it the output
+// window cannot be left out of the screen's copy (WDA_EXCLUDEFROMCAPTURE), and the engine would take its own frames.
+// Windows 11 keeps Graphics Capture for such a window (round 31: it hands over the window's own frames only).
+// SM_WIN10_CROP=1 / 0: as if on such a Windows / not (tests).
+static DWORD WindowsBuild()
+{
+    static const DWORD build = [] {
+        typedef LONG (WINAPI *RtlGetVersionFn)(OSVERSIONINFOW *);
+        OSVERSIONINFOW v = {};
+        v.dwOSVersionInfoSize = sizeof(v);
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        const auto get = ntdll ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion")) : nullptr;
+        return get && get(&v) == 0 ? v.dwBuildNumber : DWORD(0);
+    }();
+    return build;
+}
+static bool Win10Crop()
+{
+    static const bool crop = [] {
+        char forced[4] = {};
+        if (GetEnvironmentVariableA("SM_WIN10_CROP", forced, sizeof(forced)) > 0) return forced[0] == '1';
+        const DWORD build = WindowsBuild();
+        return build >= 19041 && build < 20348;
+    }();
+    static bool told = false;
+    if (crop && !told)
+    {
+        told = true;
+        Trace("[window] Windows build %lu: Graphics Capture keeps its border here - a window that is not its whole screen is taken by DXGI, cut to its client area", WindowsBuild());
+    }
+    return crop;
+}
+
 // Does the cut-out take in the whole of its screen.
 static bool CropIsWholeScreen(const RECT &crop, HMONITOR monitor)
 {
@@ -450,7 +486,7 @@ static bool WindowDxgiStart(HWND hwnd)
     // "frames" were a wave in DLSS MFG's pace (4.6 ms, up to 20, against 0.3
     // for a window over the whole screen). Any other window is taken by
     // Graphics Capture, which hands over that window's own frames only.
-    if (!CropIsWholeScreen(crop, monitor)) return false;
+    if (!CropIsWholeScreen(crop, monitor) && !Win10Crop()) return false;
     g_capture_target_monitor = monitor;
     const RECT margins = CropMargins(crop.right - crop.left, crop.bottom - crop.top);
     const bool opened = DeskStart(crop.right - crop.left - margins.left - margins.right, crop.bottom - crop.top - margins.top - margins.bottom);
@@ -476,7 +512,8 @@ static bool WindowStart(HWND hwnd)
     WindowStop();
     if (hwnd == nullptr) { Trace("[window] window source stopped"); return true; }
     if (!IsWindow(hwnd)) { Trace("[window] %p is no window", (void *)hwnd); return false; }
-    if (smOpt.capture_api.load() != 1 && !FillWanted() && WindowDxgiStart(hwnd)) return true;
+    // (1.1.0: on Windows 10 - Win10Crop - by DXGI whatever was picked, a window scaled onto its screen too.)
+    if (((smOpt.capture_api.load() != 1 && !FillWanted()) || Win10Crop()) && WindowDxgiStart(hwnd)) return true;
     Trace("[window] taken by Graphics Capture (the window's own frames)");
     if (!wgc_ns::GraphicsCaptureSession::IsSupported())
     { Trace("[window] this Windows has no Graphics Capture"); return false; }
@@ -629,8 +666,11 @@ static bool WindowTake(Pipeline &pipe)
         RECT crop = {}; HMONITOR monitor = nullptr;
         // No longer the whole screen (the game left its borderless size): it
         // is taken again, by Graphics Capture this time (WindowDxgiStart).
-        if (!WindowClientOnMonitor(lfCap.window, crop, monitor) || monitor != lfCap.monitor ||
-            !CropIsWholeScreen(crop, monitor)) {
+        // (1.1.0, Win10Crop: a window cut out of its screen is taken again only when it changed size or left the screen.)
+        const bool on_screen = WindowClientOnMonitor(lfCap.window, crop, monitor);
+        const bool resized = crop.right - crop.left != lfCap.window_crop.right - lfCap.window_crop.left ||
+                             crop.bottom - crop.top != lfCap.window_crop.bottom - lfCap.window_crop.top;
+        if (!on_screen || monitor != lfCap.monitor || resized || (!CropIsWholeScreen(crop, monitor) && !Win10Crop())) {
             const HWND hwnd = lfCap.window; WindowStart(hwnd); return false;
         }
         lfCap.window_crop = crop;
@@ -1137,6 +1177,7 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
     ctx4->Release();
     if (FAILED(signaled)) return BridgeResult::Error;
     lfCap.d11_ctx->Flush();
+    ++g_pieces[2];
 
     const UINT64 wanted = lfCap.sync_value;
     // The conversion is submitted next on this queue. GPU-to-GPU ordering
@@ -1276,8 +1317,19 @@ static bool SwizzleIntoPicture(Pipeline &pipe)
                 (unsigned long long)dd.Width, (unsigned long long)dd.Height);
         if (pic_w == 0 || pic_h == 0)
         { Trace("[source] nothing to copy - frame dropped"); return false; }
-        D3D12_BOX box = { 0, 0, 0, pic_w, pic_h, 1 };
-        lfCore.cmd->CopyTextureRegion(&into, 0, 0, 0, &from, &box);
+        // (Round 88l: SMSR 1.0 - the frame taken made twice as large into the picture, once a real frame: lf_smsr.inl.)
+        ID3D12Resource *enlarged = nullptr;
+        if (g_smsr_capture && dd.Width == 2 * view_desc.Width && dd.Height == 2 * view_desc.Height)
+        {
+            const RECT all = { 0, 0, LONG(view_desc.Width), LONG(view_desc.Height) };
+            enlarged = SmsrRun(lfCore.cmd, lfCap.rgba, view_desc.Format, all);
+        }
+        if (enlarged) lfCore.cmd->CopyResource(pipe.picture.gpu_tex, enlarged);
+        else
+        {
+            D3D12_BOX box = { 0, 0, 0, pic_w, pic_h, 1 };
+            lfCore.cmd->CopyTextureRegion(&into, 0, 0, 0, &from, &box);
+        }
     }
     D3D12_RESOURCE_BARRIER to_uav = Barrier(lfCap.rgba, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

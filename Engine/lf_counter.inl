@@ -21,6 +21,16 @@
 //
 // Whether it is shown is the "FPS counter" switch in the app; the app reads
 // the same two figures once a second for its own status line (CounterRates).
+//
+// Round 79, "Advanced" (counter=2): below the figures, the frame time of what
+// reached the SCREEN - each frame's moment there as the swap chain says it
+// (its frame statistics: the Present it showed last and when), not when it was
+// handed over - as a line over the last 160 frames, with its middle, its
+// spread and its longest, and the game's own frame time. The user's word: the
+// figures stay steady while the eye sees the frames come unevenly - a line of
+// the Presents would have shown nothing (PresentMon: 0.1% of the Presents a
+// quarter off the middle, 25% of the frames on the screen; FIX PACING.md).
+// Redrawn twenty times a second at most.
 
 static struct CounterState
 {
@@ -52,18 +62,90 @@ static struct CounterState
     UINT w = 0, h = 0, pitch = 0;           // the drawn box; pitch: a row of it in the back buffer's format (CounterProof)
     bool drawn = false, failed = false;
     int drawn_base = -2, drawn_shown = -2, drawn_mode = -2;
+    // Round 79, Advanced: the last frames' times on the screen (ms), the swap chain's last word on what it showed.
+    bool advanced = false;
+    static constexpr unsigned kGaps = 160;
+    float gaps[kGaps] = {};
+    unsigned gap_n = 0, gap_at = 0;
+    UINT stat_count = 0, stat_refresh = 0;
+    double stat_at = 0.0, last_present = 0.0, held = 0.0;
+    bool stat_ok = false, stat_exact = false;
+    static constexpr unsigned kIds = 16;
+    UINT ids[kIds] = {};
+    bool id_repeat[kIds] = {};
+    unsigned id_at = 0;
+    ULONGLONG drawn_at = 0;
+    HFONT small_font = nullptr;
 } g_counter;
 
-static constexpr UINT kCounterMaxW = 640, kCounterMaxH = 128;
+static constexpr UINT kCounterMaxW = 640, kCounterMaxH = 256;
 
-// The switch in the app (the corner offset is the counter's own).
+
+// The switch in the app (the corner offset is the counter's own): 0 off, 1 the figures, 2 with the frame time line.
 static void CounterLook()
 {
     CounterState &c = g_counter;
-    const bool on = smOpt.counter.load() != 0;
-    if (on != c.on) Trace("[counter] the FPS counter is %s (drawn by the engine, in the frame)", on ? "on" : "off");
+    const int mode = smOpt.counter.load();
+    const bool on = mode != 0, advanced = mode == 2;
+    if (on != c.on || advanced != c.advanced)
+        Trace("[counter] the FPS counter is %s (drawn by the engine, in the frame)", !on ? "off" : advanced ? "on, with the frame time line" : "on");
     c.on = on;
+    c.advanced = advanced;
     c.hold = false;
+}
+
+// Round 79: after a Present, the frame time on the screen - the swap chain's own word on the frame it showed last
+// and when; the Presents' own times only where it says nothing. Under c.lock.
+static void CounterScreenTime(double now, bool repeat)
+{
+    CounterState &c = g_counter;
+    // This Present's own number, and whether it shows a picture again (round 80): the statistics come one or two
+    // Presents behind, and what each tells of is looked up by its number - taken from the Present being made, a
+    // "once more" fell on the wrong frame and the line showed spikes of 60 ms where PresentMon saw 5.00 every time.
+    UINT id = 0;
+    if (lfShow.chain && SUCCEEDED(lfShow.chain->GetLastPresentCount(&id)))
+    {
+        c.ids[c.id_at] = id;
+        c.id_repeat[c.id_at] = repeat;
+        c.id_at = (c.id_at + 1) % CounterState::kIds;
+    }
+    auto repeated = [&](UINT which) {
+        for (unsigned i = 0; i < CounterState::kIds; ++i) if (c.ids[i] == which && which != 0) return c.id_repeat[i];
+        return false;
+    };
+    DXGI_FRAME_STATISTICS st = {};
+    if (!lfShow.chain || FAILED(lfShow.chain->GetFrameStatistics(&st)) || st.SyncQPCTime.QuadPart == 0) return;
+    if (st.PresentCount == c.stat_count) return;
+    static LARGE_INTEGER frequency = {};
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    // SyncQPCTime is the refresh the statistics were taken at, not the one the frame came on (read right after a
+    // Present that mixed 5 and 10 ms where PresentMon saw 5.00 every time): the frame's own refresh is
+    // PresentRefreshCount. On a fixed refresh that count is the time; with VRR the time is only known where the
+    // statistics were taken at the frame's own refresh.
+    const bool exact = st.SyncRefreshCount == st.PresentRefreshCount;
+    const double at = double(st.SyncQPCTime.QuadPart) / double(frequency.QuadPart);
+    // The frame before this one was on the screen from its refresh to this one's.
+    double gap = -1.0;
+    if (c.stat_ok && st.PresentCount == c.stat_count + 1)
+    {
+        const double refresh = OutputRefresh();
+        if (!lfShow.vrr && refresh >= 24.0 && st.PresentRefreshCount > c.stat_refresh)
+            gap = (st.PresentRefreshCount - c.stat_refresh) * 1000.0 / refresh;
+        else if (lfShow.vrr && exact && c.stat_exact && at > c.stat_at) gap = (at - c.stat_at) * 1000.0;
+    }
+    c.stat_count = st.PresentCount;
+    c.stat_refresh = st.PresentRefreshCount;
+    c.stat_at = at;
+    c.stat_exact = exact;
+    c.stat_ok = true;
+    if (gap <= 0.0 || gap > 250.0) { c.held = 0.0; return; }
+    // A frame is on the screen until a new picture comes: its time goes on while the one shown now is the same again.
+    c.held += gap;
+    if (repeated(st.PresentCount)) return;
+    c.gaps[c.gap_at] = static_cast<float>(c.held);
+    c.gap_at = (c.gap_at + 1) % CounterState::kGaps;
+    if (c.gap_n < CounterState::kGaps) ++c.gap_n;
+    c.held = 0.0;
 }
 
 // After every Present of the output (lf_vrr.inl). real: a real frame's first.
@@ -85,6 +167,7 @@ static void CounterPresented(double source, bool own_capture)
     const bool real = own_capture ? (stamp <= 0.0 || stamp != c.last_source) : (stamp > 0.0 && stamp != c.last_source);
     if (real) { c.last_source = stamp; ++c.reals; }
     ++c.shown;
+    if (c.on && c.advanced) CounterScreenTime(now, false);
     if (c.since == 0.0) c.since = now;
     if (now - c.since < 0.25) return;
     c.shown_q[c.q] = c.shown;
@@ -173,8 +256,8 @@ static bool CounterDraw(int base, int shown, bool both, UINT screen_h)
         SetBkMode(c.dc, TRANSPARENT);
     }
     if (!c.pixels) return false;
-    // 24 pixels tall on 1440 lines; other screens in proportion.
-    const int scale = std::clamp(static_cast<int>(screen_h * 100u / 1440u), 70, 220);
+    // 24 pixels tall on 1440 lines; other screens in proportion. (Round 85, GitHub 71: times the size asked in the app.)
+    const int scale = std::clamp(static_cast<int>(screen_h * 100u / 1440u) * smOpt.counter_size.load() / 100, 35, 220);
     if (scale != c.scale_for)
     {
         if (c.font) DeleteObject(c.font);
@@ -201,6 +284,90 @@ static bool CounterDraw(int base, int shown, bool both, UINT screen_h)
             if ((dx || dy) && dx * dx + dy * dy <= edge * edge + 1) TextOutW(c.dc, edge + dx, edge + dy, text, length);
     SetTextColor(c.dc, RGB(0, 255, 0));
     TextOutW(c.dc, edge, edge, text, length);
+    GdiFlush();
+    c.w = static_cast<UINT>(w);
+    c.h = static_cast<UINT>(h);
+    return true;
+}
+
+// Round 79, Advanced: the figures, a line of numbers and the frame time line on a dark box. GDI's red is how dark
+// (the box at four fifths, the edges of the text in full), its green how white (text and the line in full,
+// the line's middle dim). Under c.lock, after CounterDraw made the DC.
+static bool CounterDrawAdvanced(int base, int shown, bool both, UINT screen_h)
+{
+    CounterState &c = g_counter;
+    if (!CounterDraw(base, shown, both, screen_h)) return false;   // the DC, the big font, the figures' own box
+    const int scale = c.scale_for;
+    static int small_for = 0;
+    if (!c.small_font || small_for != scale)
+    {
+        if (c.small_font) DeleteObject(c.small_font);
+        c.small_font = CreateFontW(-(15 * scale / 100), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI");
+        small_for = scale;
+    }
+    // The last frames in order, and what they say.
+    float v[CounterState::kGaps];
+    const unsigned n = c.gap_n;
+    for (unsigned i = 0; i < n; ++i) v[i] = c.gaps[(c.gap_at + CounterState::kGaps - n + i) % CounterState::kGaps];
+    double sum = 0.0, most = 0.0;
+    for (unsigned i = 0; i < n; ++i) { sum += v[i]; most = std::max(most, double(v[i])); }
+    const double mean = n ? sum / n : 0.0;
+    double var = 0.0;
+    for (unsigned i = 0; i < n; ++i) var += (v[i] - mean) * (v[i] - mean);
+    const double sd = n ? std::sqrt(var / n) : 0.0;
+    const int pad = std::max(4, 6 * scale / 100);
+    const int w = std::min<int>(kCounterMaxW, (330 * scale / 100) & ~1);
+    const int graph_h = std::min<int>(70 * scale / 100, kCounterMaxH / 2);
+    // The figures (already drawn at the top left by CounterDraw), then the line of numbers.
+    const int figures_h = static_cast<int>(c.h);
+    wchar_t line[96];
+    if (n >= 8)
+        swprintf_s(line, L"%.2f ms  \x00B1%.2f  max %.1f   game %.1f ms", mean, sd, most, base > 0 ? 1000.0 / base : 0.0);
+    else wcscpy_s(line, L"frame time: -");
+    SelectObject(c.dc, c.small_font);
+    SIZE size = {};
+    GetTextExtentPoint32W(c.dc, line, static_cast<int>(wcslen(line)), &size);
+    const int text_y = figures_h;
+    const int graph_y = text_y + size.cy + pad / 2;
+    const int h = std::min<int>((graph_y + graph_h + pad + 1) & ~1, kCounterMaxH);
+    // The box, under the figures drawn already: only where nothing of theirs is.
+    for (int y = 0; y < h; ++y)
+    {
+        uint32_t *row = c.pixels + static_cast<size_t>(y) * kCounterMaxW;
+        for (int x = 0; x < w; ++x)
+        {
+            if (y < figures_h && x < static_cast<int>(c.w) && (row[x] & 0x00FFFF00u)) continue;
+            row[x] = 0x00D00000u;
+        }
+    }
+    // The numbers, with an edge.
+    SetTextColor(c.dc, RGB(255, 0, 0));
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+            if (dx || dy) TextOutW(c.dc, pad + dx, text_y + dy, line, static_cast<int>(wcslen(line)));
+    SetTextColor(c.dc, RGB(255, 255, 0));
+    TextOutW(c.dc, pad, text_y, line, static_cast<int>(wcslen(line)));
+    // The line: its top twice the middle, so an even line lies across the middle; the middle dim.
+    if (n >= 2)
+    {
+        const double top = std::max(2.0 * mean, most * 1.05);
+        const int gx = pad, gw = w - 2 * pad, gy = graph_y, gh = graph_h;
+        HPEN dim = CreatePen(PS_SOLID, 1, RGB(208, 70, 0));
+        HPEN bright = CreatePen(PS_SOLID, std::max(1, scale / 100), RGB(255, 255, 0));
+        HGDIOBJ old = SelectObject(c.dc, dim);
+        const int mid = gy + gh - static_cast<int>(gh * mean / top);
+        MoveToEx(c.dc, gx, mid, nullptr); LineTo(c.dc, gx + gw, mid);
+        SelectObject(c.dc, bright);
+        for (unsigned i = 0; i < n; ++i)
+        {
+            const int x = gx + static_cast<int>((gw - 1) * double(i + CounterState::kGaps - n) / double(CounterState::kGaps - 1));
+            const int y = gy + gh - static_cast<int>(gh * std::min(1.0, v[i] / top));
+            if (i == 0) MoveToEx(c.dc, x, y, nullptr); else LineTo(c.dc, x, y);
+        }
+        SelectObject(c.dc, old);
+        DeleteObject(dim);
+        DeleteObject(bright);
+    }
     GdiFlush();
     c.w = static_cast<UINT>(w);
     c.h = static_cast<UINT>(h);
@@ -412,15 +579,19 @@ static void CounterStamp(ID3D12GraphicsCommandList *list, ID3D12Resource *back_b
     // Both figures while frames in between are made; the one there is otherwise.
     const bool both = FgRequested();
     const int base = c.base_fps, shown = both ? c.shown_fps : -1;
-    if (!c.drawn || base != c.drawn_base || shown != c.drawn_shown || int(both) != c.drawn_mode)
+    // (Round 79: Advanced - its line moves with every frame: redrawn twenty times a second.)
+    const ULONGLONG tick = GetTickCount64();
+    const int mode = int(both) + (c.advanced ? 2 : 0);
+    if (!c.drawn || base != c.drawn_base || shown != c.drawn_shown || mode != c.drawn_mode || (c.advanced && tick - c.drawn_at >= 50))
     {
-        if (!CounterDraw(base, shown, both, desc.Height)) return;
+        if (!(c.advanced ? CounterDrawAdvanced(base, shown, both, desc.Height) : CounterDraw(base, shown, both, desc.Height))) return;
+        c.drawn_at = tick;
         // The other buffer: the one in front may still be read by a list on its way.
         const unsigned next = c.front ^ 1u;
         CounterConvert(c.mapped[next]);
         c.front = next;
         c.drawn = true;
-        c.drawn_base = base; c.drawn_shown = shown; c.drawn_mode = int(both);
+        c.drawn_base = base; c.drawn_shown = shown; c.drawn_mode = mode;
         auto to_write = Barrier(c.glyphs, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         list->ResourceBarrier(1, &to_write);
         D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};

@@ -162,7 +162,9 @@ static bool UpscaleMonitor(RECT &monitor)
 static void UpscaleTrack(const RECT &frame)
 {
     const HWND game = lfCap.window;
-    RECT src = { 0, 0, static_cast<LONG>(lfShow.w), static_cast<LONG>(lfShow.h) };
+    // (Round 88m: the window's own captured size - not the picture's, which SMSR makes twice as large: the place was
+    // measured against that, and the top left quarter of the picture filled the screen, a zoom - GTA V at 720p.)
+    RECT src = { 0, 0, static_cast<LONG>(lfCap.w), static_cast<LONG>(lfCap.h) };
     POINT corner = { 0, 0 };
     RECT client = {};
     if (ClientToScreen(game, &corner) && GetClientRect(game, &client) && client.right > 0 && client.bottom > 0)
@@ -188,8 +190,8 @@ static void UpscaleTrack(const RECT &frame)
         Trace("[upscale] %ldx%ld of the window -> %ldx%ld on the %ldx%ld screen (x%.2f)",
             sw, sh, dw, dh, bw, bh, scale);
     g_up.src = src;
-    g_up.cap_w = static_cast<LONG>(lfShow.w);
-    g_up.cap_h = static_cast<LONG>(lfShow.h);
+    g_up.cap_w = static_cast<LONG>(lfCap.w);
+    g_up.cap_h = static_cast<LONG>(lfCap.h);
     g_up.dst = dst;
     g_up.placed = true;
 }
@@ -708,7 +710,8 @@ static bool SharpenFormat(DXGI_FORMAT format)
     return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM;
 }
 
-// The kind of "Upscaler" picked in the app: 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K.
+// The kind of "Upscaler" picked in the app: 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K,
+// 5 SMSR 1.0 (round 88k, lf_smsr.inl).
 static int UpscaleKind()
 {
     return smOpt.upscaler.load();
@@ -719,7 +722,8 @@ static int UpscaleKind()
 static bool SharpenAsked()
 {
     const int kind = UpscaleKind();
-    return (kind == 1 ? smOpt.sharpness.load() > 0 || smOpt.over_sharpness.load() > 0 : kind == 4 && smOpt.sharpness.load() > 0) && !g_up.failed;
+    // (Round 88o: SMSR with it too, as the owner asked.)
+    return (kind == 1 ? smOpt.sharpness.load() > 0 || smOpt.over_sharpness.load() > 0 : (kind == 4 || kind == 5) && smOpt.sharpness.load() > 0) && !g_up.failed;
 }
 
 // How hard the output is sharpened. Left alone ("Off"): none at 1:1, full
@@ -758,8 +762,21 @@ static float UpscaleOver(DXGI_FORMAT format)
 // back into a.
 static ID3D12Resource *UpscalePasses(ID3D12GraphicsCommandList *list, ID3D12Resource *src, DXGI_FORMAT src_format,
                                      ID3D12Resource *a, ID3D12Resource *b, DXGI_FORMAT format, UINT w, UINT hgt,
-                                     const RECT &s, const RECT &d, float sharp, float over = 0.0f, bool scale = true, int kind = 0)
+                                     const RECT &s_in, const RECT &d, float sharp, float over = 0.0f, bool scale = true, int kind = 0)
 {
+    // (Round 88k, "SMSR 1.0": the part scaled made twice as large by our network first - lf_smsr.inl - and the
+    // scaling below takes that the rest of the way.)
+    RECT s = s_in;
+    if (scale && SmsrWanted(kind, src_format, format, s.right - s.left, s.bottom - s.top, d.right - d.left, d.bottom - d.top))
+        if (ID3D12Resource *up = SmsrRun(list, src, src_format, s))
+        {
+            src = up;
+            src_format = kSmsrOut;
+            s = { 0, 0, 2 * (s.right - s.left), 2 * (s.bottom - s.top) };
+        }
+    // (SMSR's picture exactly the size it lands at - made on the way here, or as the frame was taken: taken texel for
+    // texel - the edge-following Lanczos is not quite a copy at 1:1.)
+    if (kind == 5 && s.right - s.left == d.right - d.left && s.bottom - s.top == d.bottom - d.top) kind = 3;
     const LONG srw = s.right - s.left, srh = s.bottom - s.top, dsw = d.right - d.left, dsh = d.bottom - d.top;
     const UINT stride = lfCore.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const UINT set = g_up.ring++ % kUpscaleSets;
@@ -895,7 +912,9 @@ static bool UpscaleRecord(ID3D12GraphicsCommandList *list, ID3D12Resource *bb, I
     if (srw <= 0 || srh <= 0 || dsw <= 0 || dsh <= 0) return false;
     const float sharp = UpscaleSharpness(s, d, bd.Format), over = UpscaleOver(bd.Format);
     // (A picture the output's own size, all of it: nothing to scale.)
-    const bool scale = srw != bw || srh != bh || dsw != bw || dsh != bh;
+    // (Round 88m: and a part that is not the whole picture - the window's frame left out - though it is the screen's own
+    // size: SMSR's picture twice a 1280x720 window with its title bar, on a 2560x1440 screen, was copied from its corner.)
+    const bool scale = srw != bw || srh != bh || dsw != bw || dsh != bh || s.left != 0 || s.top != 0 || srw != sw || srh != sh;
     if (!scale && sharp <= 0.0f && over <= 0.0f) return false;
     ID3D12Resource *done = UpscalePasses(list, src, sd.Format, g_up.a, g_up.b, bd.Format,
                                          static_cast<UINT>(bw), static_cast<UINT>(bh), s, d, sharp, over, scale, UpscaleKind());

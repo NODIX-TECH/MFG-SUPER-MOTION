@@ -11,9 +11,9 @@ open System.Reflection
 [<assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")>]
 [<assembly: System.Reflection.AssemblyCopyrightAttribute("© 2026 NODIX TECH. All rights reserved.")>]
 [<assembly: System.Reflection.AssemblyDescriptionAttribute("MFG SUPER MOTION built by NODIX TECH.")>]
-[<assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.3.0")>]
-[<assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.3")>]
+[<assembly: System.Reflection.AssemblyFileVersionAttribute("1.1.0.0")>]
+[<assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.1.0")>]
 [<assembly: System.Reflection.AssemblyProductAttribute("MFG SUPER MOTION")>]
 [<assembly: System.Reflection.AssemblyTitleAttribute("MFG SUPER MOTION")>]
-[<assembly: System.Reflection.AssemblyVersionAttribute("1.0.3.0")>]
+[<assembly: System.Reflection.AssemblyVersionAttribute("1.1.0.0")>]
 do()

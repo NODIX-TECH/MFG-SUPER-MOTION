@@ -71,8 +71,15 @@ type MainWindow() as this =
     member private this.InitializeComponent() =
         AvaloniaXamlLoader.Load(this)
         // The "?" beside one of the app's own techniques: what it is, in a few words, in a small window of its own.
+        // (Round 72: and beside two rows users could not tell the use of - the study guide, Even pacing.)
         for name, pick in [ "AmlWhatIs", (fun (m: MainViewModel) -> m.Text.AdaptiveLearning, m.Text.WhatIsAml)
-                            "AfsWhatIs", (fun (m: MainViewModel) -> m.Text.AdaptiveFlow, m.Text.WhatIsAfs) ] do
+                            "AfsWhatIs", (fun (m: MainViewModel) -> m.Text.AdaptiveFlow, m.Text.WhatIsAfs)
+                            "GuideWhatIs", (fun (m: MainViewModel) -> m.Text.AmlGuide, m.Text.WhatIsAmlGuide)
+                            "PacingWhatIs", (fun (m: MainViewModel) -> m.Text.EvenPacing, m.Text.WhatIsEvenPacing)
+                            "SmoothWhatIs", (fun (m: MainViewModel) -> m.Text.UltraSmooth, m.Text.WhatIsUltraSmooth)
+                            "TriWhatIs", (fun (m: MainViewModel) -> m.Text.TriangleMesh, m.Text.WhatIsTriangleMesh)
+                            "StretchWhatIs", (fun (m: MainViewModel) -> m.Text.Stretch, m.Text.WhatIsStretch)
+                            "LockWhatIs", (fun (m: MainViewModel) -> m.Text.LockRefresh, m.Text.WhatIsLockRefresh) ] do
             let button = this.FindControl<Button>(name)
             if not (isNull button) then
                 button.Click.Add(fun _ ->
@@ -108,6 +115,24 @@ type MainWindow() as this =
                                 | "CropRightBox" -> model.CropRightText
                                 | _ -> model.CropBottomText
                         | _ -> ()))
+        // 1.1.0, last page round: Custom's number, typed in the multiplier's field - digits and one decimal mark; Enter or Escape leaves it,
+        // and what it would not take is put back to what is kept.
+        match this.FindControl<NumericUpDown>("CustomMultiplierBox") with
+        | null -> ()
+        | spin ->
+            spin.AddHandler(InputElement.TextInputEvent, (fun _ (args: TextInputEventArgs) ->
+                if not (isNull args.Text) && args.Text |> Seq.exists (fun c -> not (System.Char.IsDigit c || c = '.' || c = ',')) then args.Handled <- true),
+                            Avalonia.Interactivity.RoutingStrategies.Tunnel)
+            spin.AddHandler(InputElement.KeyDownEvent, (fun _ (args: KeyEventArgs) ->
+                if args.Key = Key.Enter || args.Key = Key.Escape then
+                    leave ()
+                    args.Handled <- true),
+                            Avalonia.Interactivity.RoutingStrategies.Tunnel)
+            spin.LostFocus.Add(fun _ ->
+                Dispatcher.UIThread.Post(fun () ->
+                    match this.DataContext with
+                    | :? MainViewModel as model when not spin.IsKeyboardFocusWithin -> spin.Value <- model.CustomMultiplier
+                    | _ -> ()))
         this.AddHandler(InputElement.PointerPressedEvent, (fun _ (args: PointerPressedEventArgs) ->
             match this.FocusManager.GetFocusedElement(), args.Source with
             | (:? TextBox), (:? Visual as source) ->
@@ -165,7 +190,8 @@ type MainWindow() as this =
                 model.PresetCPicked.Add(fun () -> this.ShowWhatIs(model.Text.PresetPerformance, model.Text.PresetCWarning))
             | _ -> ())
 
-    member private this.ShowWhatIs(title: string, text: string) =
+    // (Round 72: also a mod's ShowMessage - Views\ModHost.fs.)
+    member this.ShowWhatIs(title: string, text: string) =
         let panel = StackPanel(Spacing = 16.0, Margin = Thickness(24.0, 20.0, 24.0, 20.0))
         panel.Children.Add(TextBlock(Text = title, FontSize = 18.0, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap))
         panel.Children.Add(TextBlock(Text = text, FontSize = 14.0, TextWrapping = TextWrapping.Wrap, MaxWidth = 400.0))
@@ -194,12 +220,18 @@ type MainWindow() as this =
         if isNull handle then 0n else handle.Handle
 
     member _.SetTransparency(enabled: bool) =
+        // (Linux, round 73: no glass - X11 and Wayland show a window asking for it as see-through, with nothing behind.)
+        let enabled = enabled && System.OperatingSystem.IsWindows()
         transparencyEnabled <- enabled
         if nativeBackdrop then
             WindowsBackdrop.trySet (this.NativeHandle()) false (this.ActualThemeVariant = ThemeVariant.Dark) |> ignore
             nativeBackdrop <- false
         this.TransparencyLevelHint <-
             if enabled then [| WindowTransparencyLevel.AcrylicBlur; WindowTransparencyLevel.Transparent |]
+            // (Linux: X11 windows are see-through ones whatever is asked; asked for none, their pictures are drawn
+            // without the alpha channel and the screen shows them see-through - asked for "transparent", the app's
+            // own solid background fills it.)
+            elif not (System.OperatingSystem.IsWindows()) then [| WindowTransparencyLevel.Transparent |]
             else [| WindowTransparencyLevel.None |]
         if enabled && this.ActualTransparencyLevel = WindowTransparencyLevel.Transparent then
             nativeBackdrop <- WindowsBackdrop.trySet (this.NativeHandle()) true (this.ActualThemeVariant = ThemeVariant.Dark)

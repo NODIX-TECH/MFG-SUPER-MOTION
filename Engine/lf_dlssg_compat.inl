@@ -3,6 +3,16 @@
 #include <bcrypt.h>
 #pragma comment(lib, "bcrypt.lib")
 
+// Round 85 (the owner's request): XeSS MFG on the tensor cores of an RTX 20/30 - the package's XeSS-FG
+// engine (Intel's model 15 on its own CUDA runner). It takes over only an evaluation that comes through the NGX core,
+// so the generator is then created and evaluated through the core (EnsureFg), not through the runtime's own exports.
+// Asked for in the app ("Tensor cores" under XeSS MFG, the option xess_tensor) and taken at the start on an RTX 20/30
+// only (sm_engine.cpp): every other card keeps XeSS MFG on Intel's own library.
+static bool FgXessTensor() { return g_xess_tensor; }
+// The runtime the package's proxy hands the NGX core (its cache), once laid out: on RTX 40 it is opened first and
+// adapted as the engine's own is (EnsureFg), so that the core takes that copy.
+static std::wstring g_compat_runtime;
+
 static int FgComputeCapability()
 {
     static int cached = -1;
@@ -98,7 +108,9 @@ static void FgRemoveOwnFolder(const std::wstring &folder)
 static bool FgPrepareCompatibility(const wchar_t *workerDirectory, bool startup = false)
 {
     const int sm = FgComputeCapability();
-    if (sm != 75 && sm != 86) return true; // Ada has its own retarget; Blackwell stays native.
+    // (Ada has its own retarget; Blackwell stays native - for DLSS MFG. Round 86: XeSS MFG on the tensor cores takes the
+    // package on RTX 40 and 50 as well - its kernels compiled for the card when it starts, the package's own route there.)
+    if (sm != 75 && sm != 86 && !(g_xess_tensor && (sm == 89 || sm >= 100))) return true;
     static HMODULE proxy = nullptr;
     if (proxy) return true;
     if (!startup) {
@@ -109,28 +121,41 @@ static bool FgPrepareCompatibility(const wchar_t *workerDirectory, bool startup 
     // nvngx_dlssg.dll, the same file - and preset C (FG Lite). Its files are no longer inside the proxy: the proxy
     // finds its INI and its dlssg_sm86\ folder (backend, kernel pack, runtime) beside itself, so all of them are laid
     // out side by side in the cache, each one checked by its hash. (Its super-resolution and XeSS packs are not used.)
+    // Round 85: upstream 0.4.1 (dlssg-release-0.4.1-x64; its proxy's hash is the one its README publishes): the same
+    // layout and runtime, a new proxy, backend and kernel pack. Its XeSS-FG engine (Intel's model on the tensor cores,
+    // [FrameGeneration] Engine=XeSS) is not used: it takes over at the NGX core's EvaluateFeature, and the engine calls
+    // the runtime's own export - measured, 3411 evaluations went to NVIDIA's model and none to XeSS (xefg_summary,
+    // evaluates 0). Its pack (xefg_kernels.dll, 15.6 MB) is not shipped.
     struct Part { const wchar_t *from; const wchar_t *to; const char *sha; };
     const std::wstring here = std::wstring(workerDirectory);
     const Part parts[] = {
-        { L"dlssg_compat\\version.dll", L"version.dll", "7B3F90435BE4F94348BF8D128C84871C7F904C704F7690601A263277C327A7B2" },
-        { L"dlssg_compat\\sm86_backend.dll", L"dlssg_sm86\\backend\\sm86_backend.dll", "30FFC6E09A347CCDE87ECC6FA54FD7818F5ED8A9353F5C31C2A90835C7F0CA9B" },
-        { L"dlssg_compat\\fg_kernels.dll", L"dlssg_sm86\\kernels\\fg_kernels.dll", "1394C2D5D9CC8938BA3E52B043048D20D6D4C13A019C161B11A3DFD16343EC24" },
+        { L"dlssg_compat\\version.dll", L"version.dll", "275FFA781B2D244AD269D1D65D4E5B68A12A3F89FF2BAAEC58D100EB5A1FF411" },
+        { L"dlssg_compat\\sm86_backend.dll", L"dlssg_sm86\\backend\\sm86_backend.dll", "D1B56F6EE9A58BA6284804303CF903535C7ACBF4FDCE3320F6FD21F50569D357" },
+        { L"dlssg_compat\\fg_kernels.dll", L"dlssg_sm86\\kernels\\fg_kernels.dll", "F59A45A04EDDDA2F2EBAE4B8685B05AF4432A80CE87CC78D83E4B9414E079A20" },
         { L"nvngx_dlssg.dll", L"dlssg_sm86\\runtime\\nvngx_dlssg.dll", "CADEE1AA6DB3907BABDC3285DA2AEBC4553D92B89C38BA3EAE8ABD8BBA1BEA72" },
     };
+    // Round 85 (experiment): the package's XeSS-FG engine, Intel's model on the tensor cores - only when the runtime is
+    // reached through the NGX core (FgXessTensor), where the package takes over the evaluation.
+    const bool xess_tensor = FgXessTensor();
+    const Part xess_pack = { L"dlssg_compat\\xefg_kernels.dll", L"dlssg_sm86\\xefg\\xefg_kernels.dll",
+                             "E72ED96BD5EA51743CA9E3B07A7D8AF522EEB6A34CF4143F0FF1147D7DFF13BF" };
     wchar_t root[MAX_PATH] = {}; EngineDataPath(root);
     if (!root[0]) { Trace("[dlssg] unavailable: no folder for the compatibility package"); return false; }
     const std::wstring parent = std::wstring(root) + L"\\dlssg-compat";
-    const std::wstring cache = parent + L"\\0.4.0";
+    const std::wstring cache = parent + L"\\0.4.1";
+    g_compat_runtime = cache + L"\\dlssg_sm86\\runtime\\nvngx_dlssg.dll";
     if (cache.size() + 60 >= MAX_PATH) { Trace("[dlssg] unavailable: compatibility cache path is too long"); return false; }
     for (const std::wstring &folder : { parent, cache, cache + L"\\dlssg_sm86", cache + L"\\dlssg_sm86\\backend", cache + L"\\dlssg_sm86\\kernels",
-                                        cache + L"\\dlssg_sm86\\runtime", cache + L"\\logs" })
+                                        cache + L"\\dlssg_sm86\\runtime", cache + L"\\dlssg_sm86\\xefg", cache + L"\\logs" })
         if (!CreateDirectoryW(folder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    std::vector<Part> wanted(std::begin(parts), std::end(parts));
+    if (xess_tensor) wanted.push_back(xess_pack);
     const std::wstring local = cache + L"\\version.dll";
     // The 0.3.5 package's own folders (its proxy, its runtime and backend unpacked, its logs: some 60 MB) are no
     // longer used. (A proxy of it still loaded by another engine running keeps its file; the next start takes it.)
-    for (const wchar_t *old : { L"\\0.3.5-sm86", L"\\0.3.5-sm75" })
+    for (const wchar_t *old : { L"\\0.3.5-sm86", L"\\0.3.5-sm75", L"\\0.4.0" })
         if (GetFileAttributesW((parent + old).c_str()) != INVALID_FILE_ATTRIBUTES) FgRemoveOwnFolder(parent + old);
-    for (const Part &part : parts)
+    for (const Part &part : wanted)
     {
         const std::wstring placed = cache + L"\\" + part.to;
         if (FgFileHash(placed, part.sha)) continue;
@@ -157,9 +182,12 @@ static bool FgPrepareCompatibility(const wchar_t *workerDirectory, bool startup 
     // (sm_dlssg_preset.inl writes the same into the driver's profile), Auto when the driver's own is wanted.
     auto number = [](const char *name, int otherwise) { char v[8] = {}; return GetEnvironmentVariableA(name, v, sizeof(v)) > 0 ? atoi(v) : otherwise; };
     const int tier = std::clamp(number("SM_FG_TIER", 1), 0, 3);
-    static const wchar_t *const presets[] = { L"Auto", L"A", L"B", L"C" };
+    // (0.4.1 has no Auto: it runs as A, with a warning in its log.)
+    static const wchar_t *const presets[] = { L"A", L"A", L"B", L"C" };
     const int preset = std::clamp(smOpt.dlssg_preset.load(), 0, 3);
-    const std::wstring ini = L"[General]\nEnabled=1\n[FrameGeneration]\nEngine=DLSS\nMaxGeneratedFrames=5\n"
+    // (XeSS-FG: four frames a pair at most - asked for more, the package refuses frame generation altogether.)
+    const std::wstring ini = std::wstring(L"[General]\nEnabled=1\n[FrameGeneration]\nEngine=") + (xess_tensor ? L"XeSS" : L"DLSS") +
+        L"\nMaxGeneratedFrames=" + (xess_tensor ? L"3" : L"5") + L"\n"
         L"[DLSSG]\nOptimized=" + std::to_wstring(tier) + L"\nPreset=" + presets[preset] + L"\n"
         L"[Logging]\nLevel=2\nDirectory=" + cache + L"\\logs\n[Runtime]\nMode=Bundled\n[SuperResolution]\nMode=Off\n";
     if (!FgWriteUtf8(cache + L"\\dlssg_sm86.ini", ini)) return false;
@@ -181,6 +209,7 @@ static bool FgPrepareCompatibility(const wchar_t *workerDirectory, bool startup 
     }
     proxy = LoadLibraryW(local.c_str());
     if (!proxy) { Trace("[dlssg] unavailable: compatibility loader Windows error %lu", GetLastError()); return false; }
-    Trace("[dlssg] RTX compatibility 0.4.0 loaded for SM%d (runtime 310.9.16); exact kernels, up to 6x, preset %ls", sm, presets[preset]);
+    if (xess_tensor) Trace("[dlssg] RTX compatibility 0.4.1 loaded for SM%d: XeSS-FG (Intel's model) on the tensor cores, up to 4x", sm);
+    else Trace("[dlssg] RTX compatibility 0.4.1 loaded for SM%d (runtime 310.9.16); exact kernels, up to 6x, preset %ls", sm, presets[preset]);
     return true;
 }

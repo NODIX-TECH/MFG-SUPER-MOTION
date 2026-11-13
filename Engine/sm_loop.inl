@@ -13,7 +13,8 @@ struct Session
     HMONITOR monitor = nullptr;   // the screen it is on
     bool fill = false;            // the window keeps its size, its picture is scaled onto the screen
     bool dlss5 = false;           // frames from DLSS 5 MANAGER's LIVE FLOW (sm_dlss5_link.inl)
-    UINT pic_w = 0, pic_h = 0;    // the source's size everything was built for
+    UINT pic_w = 0, pic_h = 0;    // the picture's size everything was built for
+    UINT cap_w = 0, cap_h = 0;    // the source's own size (round 88l: the picture is twice it when SMSR enlarges it as it is taken)
     bool built = false;
     uint32_t frame = 0;
     bool generated_before = false;
@@ -68,8 +69,20 @@ static void SourceTell(const Session &s)
 static bool SessionBuild(Session &s)
 {
     s.pic_w = lfCap.w; s.pic_h = lfCap.h;
+    s.cap_w = lfCap.w; s.cap_h = lfCap.h;
     if (s.pic_w < 64 || s.pic_h < 64 || s.pic_w > 7680 || s.pic_h > 4320)
     { Trace("[pipe] a %ux%u source makes no sense", s.pic_w, s.pic_h); return false; }
+    // (Round 88l: "SMSR 1.0" - the picture made twice as large as each frame is taken, lf_smsr.inl.)
+    {
+        RECT screen = {};
+        g_smsr_capture = MonitorRect(s.monitor, screen) && SmsrAtCapture(s.cap_w, s.cap_h, screen, s.fill, s.dlss5);
+        if (g_smsr_capture)
+        {
+            s.pic_w *= 2; s.pic_h *= 2;
+            Trace("[smsr] each frame taken (%ux%u) made %ux%u by SMSR 1.0 - once a real frame; the frames in between are made at that size",
+                  s.cap_w, s.cap_h, s.pic_w, s.pic_h);
+        }
+    }
     UINT work_w = 0, work_h = 0;
     WorkSizeFor(s.pic_w, s.pic_h, work_w, work_h);
     const bool stretched = work_w != s.pic_w || work_h != s.pic_h;
@@ -170,6 +183,53 @@ static void GivenCheck(double stamp)
     else Trace("[pace] the game draws %.0f again, as Game FPS %d says - it is used", drawn, fps);
 }
 
+// Round 84 (from round 61, onto the 1.0.3 base): the frame loop's own watch, on a thread of its own. Users (GitHub 18,
+// 55; and a laptop's log of 2026-10-30 - RTX 4050 with the screen on the Intel card - where the loop stood still 37 s
+// at "taking a frame" while the presenter told 0 frames a second): the output stood over the game on its last picture.
+// When the loop has not come round for three seconds the output is hidden, so the game shows; when it comes round
+// again the output comes back with the game's next frame.
+static std::atomic<ULONGLONG> g_loop_beat{0};
+static std::atomic<bool> g_loop_hid{false}, g_loop_watch_stop{false};
+static std::thread g_loop_watch;
+static void LoopWatchStop()
+{
+    g_loop_watch_stop = true;
+    if (g_loop_watch.joinable()) g_loop_watch.join();
+}
+static void LoopWatchStart()
+{
+    LoopWatchStop();
+    g_loop_beat = GetTickCount64();
+    g_loop_hid = false;
+    g_loop_watch_stop = false;
+    g_loop_watch = std::thread([] {
+        bool told = false;
+        while (!g_loop_watch_stop.load())
+        {
+            Sleep(250);
+            const ULONGLONG now = GetTickCount64(), beat = g_loop_beat.load();
+            if (now - beat < 3000) { told = false; continue; }
+            if (told) continue;
+            told = true;
+            const HWND out = lfShow.hwnd;
+            const bool shown = out != nullptr && IsWindowVisible(out);
+            Trace("[stuck] the frame loop has not come round for %.1f s%s", (now - beat) / 1000.0, shown ? " - the output is hidden so the game shows" : "");
+            if (shown) { g_loop_hid = true; ShowWindowAsync(out, SW_HIDE); }
+        }
+    });
+}
+// At the top of each round of the loop.
+static void LoopBeat()
+{
+    const ULONGLONG now = GetTickCount64(), was = g_loop_beat.exchange(now);
+    if (g_loop_hid.exchange(false))
+    {
+        Trace("[stuck] the frame loop comes round again after %.1f s - the output comes back with the game's next frame", (now - was) / 1000.0);
+        lfShow.visible = false;
+        lfShow.revealed = false;
+    }
+}
+
 // One frame. 0: go on; anything else ends the engine with that code.
 static int FrameStep(Session &s)
 {
@@ -182,6 +242,10 @@ static int FrameStep(Session &s)
     // The screenshot shortcuts hold the picture while Windows takes its shot
     // (capture_shortcuts.inl).
     if (g_snapshot_frozen && lfShow.hwnd) { Sleep(15); return 0; }
+    // Round 85 (GitHub #64): another program in front - the output is hidden (WindowTrack) and nothing is made until
+    // the game is in front again: the card is that program's meanwhile. The first pair after it is far longer than
+    // the ones before, and is shown as the game drew it (FgPace::Irregular).
+    if (g_game_away.load() && lfCap.window_live) { WindowTrack(); Sleep(10); return 0; }
 
     const double t_frame = PhaseClock();
     const bool phase_on = PhasesOn();
@@ -230,7 +294,7 @@ static int FrameStep(Session &s)
     const double got_at = LatencyNow();
     if (lfRun.gpu_lost) return 6;
     // Another size: nothing made for the old one is of use.
-    if (SourceLive() && (lfCap.w != s.pic_w || lfCap.h != s.pic_h))
+    if (SourceLive() && (lfCap.w != s.cap_w || lfCap.h != s.cap_h))
         return SessionRebuild(s, "the source has another size") ? 0 : 3;
     bool source_fresh = got && lfCap.picture_changed;
     // The picture before over again is nothing new (lf_own_motion.inl,
@@ -293,6 +357,7 @@ static int FrameStep(Session &s)
     if (source_fresh && lfLuma.mapped && lfCap.luma_ok) LearnLooked(lfLuma.view, static_cast<int>(lfLuma.w), static_cast<int>(lfLuma.h), lfCap.stamp);
     if (source_fresh) LearnFrame(lfCap.stamp, reset || s.frame == 0, g_fg_prior.moved, RebuildPrior::kAcross * RebuildPrior::kDown);
     if (source_fresh && lfLuma.mapped && lfCap.luma_ok) LearnSeen(lfLuma.view, static_cast<int>(lfLuma.w), static_cast<int>(lfLuma.h));
+    if (source_fresh && lfLuma.mapped && lfCap.luma_ok) LightSeen(lfLuma.view, lfLuma.w, lfLuma.h);    // (round 86: SMFG, MsmAsk::light)
 
     if (source_fresh)
     {
@@ -324,10 +389,8 @@ static int FrameStep(Session &s)
             bool in_front = true;
             if (window != nullptr)
             {
-                DWORD source_pid = 0, front_pid = 0;
-                GetWindowThreadProcessId(window, &source_pid);
-                GetWindowThreadProcessId(GetForegroundWindow(), &front_pid);
-                in_front = IsWindow(window) && !IsIconic(window) && (source_pid == front_pid || smOpt.multi_display.load());
+                // (Round 89: a window of another program no one looks at holding the focus is the game in front.)
+                in_front = IsWindow(window) && !IsIconic(window) && GameInFront();
             }
             const unsigned arrived = g_cap_arrivals.load() - arrivals_mark;
             const ULONGLONG wait = (arrived >= 20 ? 1500ull : 4000ull) << std::min(backoff, 5u);
@@ -500,6 +563,21 @@ static int EngineRun()
             // LIVE FLOW placed the window already; it is left as it is.
             s.fill = linked_fill;
         }
+        // (Round 94: not a window that already covers its screen - there is nothing to enlarge. Kept "at its own
+        // size" it went the scaled way at x1.00: a pass over every frame shown and no frame in between drawn
+        // straight onto the back buffer - GTA V at 1440p, DLSS MFG x4: 47.5 frames of the game a second against
+        // 51.6. It goes the usual way below: real frames sharpened once as they are taken, as with any other choice.)
+        else if (mode == 0 && smOpt.upscaler.load() == 5 && !(MonitorRect(s.monitor, over) && [&] {
+                     RECT client = {}; POINT corner = {};
+                     return GetClientRect(target, &client) && ClientToScreen(target, &corner) &&
+                            abs(corner.x - over.left) <= 1 && abs(corner.y - over.top) <= 1 &&
+                            abs(client.right - (over.right - over.left)) <= 1 && abs(client.bottom - (over.bottom - over.top)) <= 1; }()))
+        {
+            // (Round 88m: SMSR picked - the game keeps the size it was set to and SMSR enlarges it; made borderless over
+            // its screen, GTA V changed its resolution and put it back.)
+            s.fill = true;
+            Trace("[source] window %p keeps its own size for SMSR 1.0 - its picture is enlarged onto the screen", (void *)target);
+        }
         else if (mode == 0 && MonitorRect(s.monitor, over))
         {
             // Borderless over its screen; scaled when it will not stay.
@@ -540,8 +618,10 @@ static int EngineRun()
     Status("@state running");
     int code = 0;
     int mfg_before = smOpt.mfg.load();
+    LoopWatchStart();
     while (!StopAsked())
     {
+        LoopBeat();
         unsigned redo = ControlApply();
         cursorfx::Tick();         // Clip / speed / hide / scale cursor (sm_cursor.inl)
         // (The switch to the window's own frames where the compositor draws the output is gone: lf_own_motion.inl.)
@@ -601,6 +681,7 @@ static int EngineRun()
         SessionTell(s);
         LearnTell();
     }
+    LoopWatchStop();
     LearnClose();
     TimingFlush();
     Trace("[pipe] stopping after %u frames (code %d)", s.frame, code);

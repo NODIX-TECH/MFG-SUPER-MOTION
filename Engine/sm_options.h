@@ -15,7 +15,7 @@ struct Options
     std::atomic<int> queue{1};         // Queue target: 0 least delay, 1 balanced, 2 smoothest
     std::atomic<int> still{1};         // what does not move stays put (lf_fg_still.inl)
     std::atomic<int> guard{0};         // 1: no frames in between while the picture moves too fast for them (sm_guard.inl)
-    std::atomic<int> msm_ai{0};        // round 52: SMFG's frames made by the neural network on the card's AI units (msm_ai.h)
+    std::atomic<int> msm_ai{0};        // round 52: SMFG's frames made by a neural network on the card's AI units (msm_ai.h): 1 SMFG Net (round 87), 2 RIFE
     std::atomic<int> msm_search{0};    // MSM FG's search for the motion: 0 in full, 1 the lighter one (msm_fg.h, MsmAsk::fast)
     std::atomic<int> aml{0};           // Adaptive Motion Learning: what the hand does to the picture is learnt, and the generator told (sm_learn.inl)
     std::atomic<int> frame_log{0};     // round 45: frames.log - every frame shown, its gap, the engine's lines among them (the app's development build only)
@@ -24,6 +24,21 @@ struct Options
     std::atomic<int> dlssg_preset{0};  // round 42, DLSS MFG: 0 the driver's own, 1 preset A (Balanced), 2 B (Quality), 3 C (Performance) - sm_dlssg_preset.inl
     std::atomic<int> frame_limit{0};   // most frames a second shown, 0 none
     std::atomic<int> adaptive{0};      // round 53, Adaptive MFG: the frames a second shown, evenly, whatever the game's (0 off, 1 the screen's)
+    std::atomic<int> xess_tensor{0};   // round 85: XeSS MFG on an RTX 20/30's tensor cores (the compatibility package's XeSS-FG engine)
+    std::atomic<int> hud_ai{0};        // round 90, SMHUD: a network finds the game's HUD once a pair; frames in between show it as the real frame has it (sm_hud.h) - every generator
+    std::atomic<int> fixed_beat{0};    // round 58, back in round 95: a fixed multiplier shown at an even beat of its own (the game's average
+                                       // rate times it), each frame made for its own moment - SMFG, DLSS MFG rebuilt; 0: its count in each pair
+    // (Round 99: the triangles' own numbers, for the owner to try - -1: msm_tri.h's own. Corners every so many pixels; rounds of the
+    //  search a size; rounds between texels; rounds on the frames themselves; how far from home a corner's way back may end
+    //  (pixels of a picture 1920 across, 0: not asked); the smallest size a pair that follows the last starts at.)
+    std::atomic<int> tri_pitch{-1}, tri_rounds{-1}, tri_fine{-1}, tri_full{-1}, tri_home{-1}, tri_top{-1};
+    std::atomic<int> tri_exact{-1}, tri_relax{-1};      // (round 100: rounds to a part of a pixel; rounds of what is plain taking its neighbours' word)
+    std::atomic<int> msm_tri{0};       // round 99, "Triangle Mesh" in the app (the owner's): SMFG's frames made by msm_tri.h - 3DRS on a mesh's corners, drawn by the rasteriser
+    std::atomic<int> fit{0};           // (OFF since 2026-11-13: it misjudged a VRR screen as fixed in the first seconds, capped x6 at the refresh (200) and the capped frames, on the grid, kept the verdict - a loop; and its snap added delay. The owner: "frames lock to 200 by themselves". Tests only: fit=1.) 1.1.0, the testers' frame time line: on a screen that stays at its fixed refresh (no VRR reaching it), SMFG / SMAI
+                                       // shown at a beat that is a whole number of refreshes (lf_vrr.inl, FitBeat) - 0: as asked
+    std::atomic<int> smooth{0};        // round 96, "Ultra Smooth" in the app: Even pacing and a frame of the game's more delay kept in hand -
+                                       // a frame that comes late, a hitch of the game's, is shown on the beat all the same (lf_fg_pace.inl)
+    std::atomic<int> ratio{0};         // round 85, GitHub 73: a multiplier in tenths (25 = x2.5), the game's own rate times it; 0 off
     std::atomic<int> game_fps{0};      // round 42: the game's frame rate as the person gives it (20..500); 0 the engine reads it from the frames
     // Round 43, as Lossless Scaling has them (sm_cursor.inl, lf_show.inl, lf_desktop.inl).
     std::atomic<int> multi_display{0}; // 1: the picture stays while another window, on another screen, is in front
@@ -40,10 +55,14 @@ struct Options
     std::atomic<int> hdr{0};
     std::atomic<int> gpu_class{1};     // the card's scheduling class: 1 realtime, 0 normal
     std::atomic<int> counter{0};       // the FPS counter, drawn into the frame
+    std::atomic<int> bloom{0};         // round 86: Bloom's strength, 0..100 (0 off; lf_bloom.inl)
+    std::atomic<int> bloom_wide{0};    // ... and how far it is drawn out sideways (anamorphic), 0..100
+    std::atomic<int> counter_size{100};// its size, percent of the usual (round 85, GitHub 71: 50..200)
     std::atomic<int> spout{0};         // every frame shown is shared with other programs as a Spout sender (sm_spout.inl)
     std::atomic<int> link{1};          // 1: frames from DLSS 5 MANAGER's LIVE FLOW when it offers them (sm_dlss5_link.inl)
     // Upscaling (lf_window_fill.inl): what is done to every frame on its way to the screen.
-    std::atomic<int> upscaler{0};      // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K (lf_window_fill.inl)
+    std::atomic<int> smsr_strength{100}; // round 88o: SMSR's detail, percent (0..200)
+    std::atomic<int> upscaler{0};      // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K, 5 SMSR 1.0 (lf_window_fill.inl, lf_smsr.inl)
     std::atomic<int> sharpness{50};    // how hard edges are drawn out, 0..100 - within what the picture's own contrast leaves room for
     std::atomic<int> over_sharpness{0};// 0..100 on top of that, with no such limit
     // The source.
@@ -67,9 +86,13 @@ static Options smOpt;
 // change it. Everything else in this file means the same for all three.
 static int g_generator = 0; // 0 DLSS, 1 XeSS, 2 MSM
 static bool g_generator_locked = false;
+static bool g_xess_tensor = false;  // round 85: XeSS MFG asked on the tensor cores and running so - by DLSS MFG's road (sm_engine.cpp)
 static bool NgxSelected() { return g_generator == 0; }
 static bool XeSelected() { return g_generator == 1; }
 static bool MsmSelected() { return g_generator == 2; }
+// Round 96: "Ultra Smooth" is Even pacing and more; what Even pacing does, either asks for.
+static bool SmoothOn() { return smOpt.smooth.load() != 0; }
+static bool EvenOn() { return smOpt.fixed_beat.load() != 0 || smOpt.smooth.load() != 0; }
 static const char *GeneratorName() { return XeSelected() ? "XeSS MFG" : MsmSelected() ? "MSM FG" : "DLSS MFG"; }
 
 // The kind of game the engine is told to expect ("Game type" in the app).
@@ -122,7 +145,13 @@ static int FlowShare()
 {
     if (smOpt.aml.load() && smOpt.aml_flow.load() && g_learn_flow.load() > 0) return g_learn_flow.load();
     const int game = smOpt.game.load();
-    return game >= 0 && game < kGameAsSet ? kGameKinds[game].flow : smOpt.flow.load();
+    const int share = game >= 0 && game < kGameAsSet ? kGameKinds[game].flow : smOpt.flow.load();
+    // Round 88j (a tester: smudging on the character and at the screen's edges, XeSS on the tensor cores too): XeSS-FG
+    // made at 35% of the picture got a moving box wrong on 36% (50 FPS) to 50% (25 FPS) of its pixels; on the tensor
+    // cores at 75% 19% to 35% (100%: no better, dearer), the Intel library at 60% 19% to 46% - its cost falls on any
+    // card. DLSS MFG and SMFG did no better made bigger. Unless the share was set by hand ("as set").
+    if (game != kGameAsSet && (g_xess_tensor || g_generator == 1)) return std::max(share, g_xess_tensor ? 75 : 60);
+    return share;
 }
 
 // Is the generator handed a motion field of the engine's (NVIDIA Optical Flow

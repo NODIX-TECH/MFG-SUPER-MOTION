@@ -4,19 +4,24 @@
     <TargetFramework>net8.0</TargetFramework>
     <!-- (Named here so that every restore - Visual Studio's too - also fetches what "Publish" needs for
          Windows x64; without it Publish in Visual Studio failed with "unable to determine the cause".) -->
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <!-- (linux-x64 too, since round 84: "Publish" makes the Linux package as well - see MakeLinuxPackage.) -->
+    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
     <AssemblyName>Mfg Super Motion</AssemblyName>
     <AssemblyTitle>MFG SUPER MOTION</AssemblyTitle>
     <Product>MFG SUPER MOTION</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\armo.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>1.0.3</Version>
+    <Version>1.1.0</Version>
     <Company>NODIX TECH</Company>
     <RootNamespace>Mfg_Super_Motion</RootNamespace>
     <Authors>NODIX TECH</Authors>
     <Description>MFG SUPER MOTION built by NODIX TECH.</Description>
     <Copyright>© 2026 NODIX TECH. All rights reserved.</Copyright>
+  </PropertyGroup>
+  <!-- (Linux, round 73: no ICU asked of the PC - many have none; the app's words are its own translations.) -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>
@@ -34,9 +39,17 @@
     <Content Include="..\Engine\out\**\*" Exclude="..\Engine\out\**\*.log" Link="Engine\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
+  <!-- Round 73, MFG SUPER MOTION for Linux (-r linux-x64): its engine instead - the Vulkan layer and Super Video
+       (Linux\build-linux.sh makes Linux\out-linux), in layer\ beside the program. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <Content Include="..\Linux\out-linux\libmfgsm_vk.so;..\Linux\out-linux\mfgsm-video" Link="layer\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <!-- (Round 74: SMFG AI for Super Video - ncnn, the network, their licences.) -->
+    <Content Include="..\Linux\out-linux\ai\*" Link="layer\ai\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
   <!-- A fresh checkout has no Engine\out yet: build it once, then take its files. -->
   <Target Name="BuildMotionEngine" BeforeTargets="AssignTargetPaths" Condition="!Exists('..\Engine\out\nvngx.dll') And '$(WithoutEngine)' != 'true'">
-    <Exec Command="&quot;$(MSBuildThisFileDirectory)..\Engine\build.cmd&quot;" ContinueOnError="true" />
+    <Exec Command="&quot;$(MSBuildThisFileDirectory)..\Engine\build.cmd&quot; out" ContinueOnError="true" />
     <Warning Condition="!Exists('..\Engine\out\nvngx.dll')" Text="The native engine was not built (Engine\build.cmd needs Visual Studio 2022 with C++). START MOTION will report missing engine files." />
     <ItemGroup>
       <Content Include="..\Engine\out\**\*" Exclude="..\Engine\out\**\*.log" Link="Engine\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
@@ -83,6 +96,26 @@
     <Message Condition="'$(InnoSetupCompiler)' != ''" Importance="high" Text="Installer: $(SetupFolder)\MFG-SUPER-MOTION-Setup-$(Version).exe" />
   </Target>
 
+  <!-- Round 84: after the Windows installer, the Linux package too - the app published for linux-x64 (with the layer
+       from Linux\out-linux) into Linux\publish-linux, then packed in WSL (Linux\wsl\package.sh: the files keep what
+       may run) into C:\dev\mfgsm linix, and its .tar.gz copied beside the installer in SetupDir. Without WSL's Ubuntu
+       it only warns: the Windows side is made all the same. -p:MakeLinux=false leaves it out. -->
+  <Target Name="MakeLinuxPackage" AfterTargets="MakeInstaller" Condition="'$(MakeLinux)' != 'false' And '$(MakeInstaller)' != 'false' And '$(SetupDir)' != '' And '$(RuntimeIdentifier)' == 'win-x64'">
+    <PropertyGroup>
+      <LinuxRoot>$(MSBuildThisFileDirectory)..\Linux</LinuxRoot>
+      <LinuxPackage>C:\dev\mfgsm linix\mfg-super-motion-linux-x64.tar.gz</LinuxPackage>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(LinuxRoot)\out-linux\libmfgsm_vk.so')" Text="Linux\out-linux has no layer: run Linux\wsl\build.sh in WSL first." />
+    <RemoveDir Directories="$(LinuxRoot)\publish-linux" />
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileFullPath)&quot; -c Release -r linux-x64 --self-contained true -p:WithoutEngine=true -p:MakeInstaller=false -p:MakeLinux=false -o &quot;$(LinuxRoot)\publish-linux&quot; -nologo -v q" />
+    <Exec Command="wsl.exe -d Ubuntu -u root -- bash /mnt/c/dev/ARMO/ARMO/Linux/wsl/package.sh" ContinueOnError="true" StandardOutputImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="LinuxPackExit" />
+    </Exec>
+    <Warning Condition="'$(LinuxPackExit)' != '0' Or !Exists('$(LinuxPackage)')" Text="The Linux package was not made (WSL's Ubuntu is needed). The Windows installer is made all the same." />
+    <Copy Condition="'$(LinuxPackExit)' == '0' And Exists('$(LinuxPackage)')" SourceFiles="$(LinuxPackage)" DestinationFolder="$(SetupFolder)" />
+    <Message Condition="'$(LinuxPackExit)' == '0' And Exists('$(LinuxPackage)')" Importance="high" Text="Linux:     $(SetupFolder)\mfg-super-motion-linux-x64.tar.gz" />
+  </Target>
+
   <ItemGroup>
     <Compile Include="Localization\Languages.fs" />
     <Compile Include="Localization\UiText.fs" />
@@ -94,6 +127,7 @@
     <Compile Include="Infrastructure\WindowsBackdrop.fs" />
     <Compile Include="Infrastructure\StartupRegistration.fs" />
     <Compile Include="Infrastructure\Updates.fs" />
+    <Compile Include="Infrastructure\LinuxLayer.fs" />
     <Compile Include="Infrastructure\MotionEngine.fs" />
     <Compile Include="Infrastructure\Feedback.fs" />
     <Compile Include="Infrastructure\VideoEngine.fs" />
@@ -104,10 +138,24 @@
     <Compile Include="Controls\SettingRow.fs" />
     <Compile Include="Controls\GroupFlow.fs" />
     <Compile Include="Views\MainWindow.axaml.fs" />
+    <Compile Include="Views\ModHost.fs" />
     <Compile Include="Views\TrayController.fs" />
     <Compile Include="App.axaml.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
+
+  <!-- App Mods (round 72): the mod kit's library, and the kit itself beside the program (ModKit: README.md for mod makers
+       and the AI they write with, the library in ModKit\sdk, a mod to start from in ModKit\template). -->
+  <ItemGroup>
+    <ProjectReference Include="..\ModSdk\ModSdk.csproj" />
+    <Content Include="..\ModKit\**\*" Exclude="..\ModKit\**\bin\**;..\ModKit\**\obj\**" Link="ModKit\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <Target Name="ModKitLibrary" AfterTargets="Build">
+    <Copy SourceFiles="$(OutDir)MfgSuperMotion.ModSdk.dll;$(OutDir)MfgSuperMotion.ModSdk.xml" DestinationFolder="$(OutDir)ModKit\sdk" SkipUnchangedFiles="true" ContinueOnError="true" />
+  </Target>
+  <Target Name="ModKitLibraryPublished" AfterTargets="Publish" BeforeTargets="MakeInstaller">
+    <Copy SourceFiles="$(PublishDir)MfgSuperMotion.ModSdk.dll;$(OutDir)MfgSuperMotion.ModSdk.xml" DestinationFolder="$(PublishDir)ModKit\sdk" SkipUnchangedFiles="true" ContinueOnError="true" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.1.0" />

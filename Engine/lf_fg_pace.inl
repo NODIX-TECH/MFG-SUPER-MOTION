@@ -18,8 +18,10 @@
 // (the capture, the motion estimate, NGX), less one step. That need jitters;
 // the delay is taken from the recent needs according to the Queue target:
 //     0  their median       - least delay, about every second pair comes late
-//     1  their 97th percentile and half a millisecond (the default; the 90th until round 46 - a pair in ten came late,
-//        and on a game as uneven as GTA V each was a moment the picture stood and then leapt)
+//     1  the largest of them and half a millisecond (the default). Round 88p: until then their 97th percentile (the
+//        90th until round 46) - so three pairs in a hundred came late by design, and each was the owner's "micro
+//        stutter" in GTA V: a pair's first frame 9 to 13 ms after the one before it, the rest 4 ms apart to catch up.
+//        Measured on GTA, walking, x4 (PresentMon): late pairs 3.3 - 5.8% -> under 0.6%, with 3 to 5 ms more delay.
 //     2  the largest of them and half a step - smoothest, most delay
 // A pair that still comes late has its frames shown as soon as they can be;
 // the delay follows the needs up at most a millisecond a pair and down a
@@ -78,9 +80,22 @@ struct FgPace
         double sorted[kNeeds];
         std::copy(needs, needs + count, sorted);
         std::sort(sorted, sorted + count);
+        // Round 96, "Ultra Smooth" (the owner: "an option that gives up delay for smoothness - the smoothest there
+        // can be"): what a pair usually asks, and a frame of the game's on top, kept in hand. Lossless Scaling runs
+        // 50 ms behind the game where the engine ran 34 - 40 (the triangles, x4 at 40 FPS), and that is all its
+        // smoothness is: a frame that comes late by less than what is in hand is shown on the beat as if it had not,
+        // and a hitch of the game's is a hold shorter by that much (its 60 ms hitch 1.8 beats, ours 6 to 11). The
+        // usual need, not the largest: the largest IS a late frame, and following it the delay rose and fell with
+        // every one. SM_SMOOTH_BUFFER=<percent of a frame> (100).
+        if (SmoothOn())
+        {
+            static const double share = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_SMOOTH_BUFFER", v, sizeof(v)) > 0 ? std::clamp(atoi(v), 10, 300) / 100.0 : 1.0; }();
+            const double frame = usual > 0.0 ? usual : 4.0 * step;
+            return sorted[count / 2] + std::clamp(share * frame, 0.008, 0.050);
+        }
         const unsigned queue = FgQueueTarget();
         if (queue == 0) return sorted[count / 2];
-        if (queue == 1) return cover_all ? sorted[count - 1] + 0.0005 : sorted[std::min(count - 1, static_cast<unsigned>(0.97 * (count - 1) + 0.5))] + 0.0005;
+        if (queue == 1) return sorted[count - 1] + 0.0005;      // (round 88p: every pair of the last ones covered - see above)
         return sorted[count - 1] + 0.5 * step;
     }
 
@@ -142,7 +157,9 @@ struct FgPace
             // four pairs' room in flight it can be more than there is room
             // for: then a twelfth of the way each pair.
             const double above = -off - 0.0005;
-            delay -= std::min(above, std::max(0.00005, above > 0.004 ? above / 12.0 : 0.0));
+            // (Ultra Smooth: half as fast - after a hitch it could not hide the delay is what the hitch left it, and
+            // comes back over a second, a pace two or three hundredths faster, not a twelfth.)
+            delay -= std::min(above, std::max(0.00005, above > 0.004 ? above / (SmoothOn() ? 30.0 : 12.0) : 0.0));
         }
         return came_late;
     }
@@ -321,8 +338,80 @@ static struct FgClock
     int off_beat = 0;                    // frames in a row the stamp was far off the clock
     double spans[8] = {};                // the last times between two taken frames
     unsigned filled = 0, next = 0;
+    int median_off = 0, median_side = 0; // round 92: frames in a row whose median lay a pace away, and to which side
+    int mean_off = 0, mean_side = 0;     // round 93: frames in a row whose mean of eight lay a pace away
+    int drift_run = 0, drift_side = 0;   // round 92: frames in a row whose stamp fell further from the clock to one side
+    double drift_off = 0.0;
 
-    void Restart(double stamp) { moment = stamp; every = 0.0; before = 0.0; known = 0; off_beat = 0; filled = next = 0; }
+    // Round 91: the pace learnt is kept across a rest (a pause, a cut, the generator starting fresh) - the game comes
+    // back at the pace it left with, as a rule. Learnt anew from the first span after it, a capture's late first stamp
+    // made it 20 ms for a game at 25 (tests\smooth, SMFG after a pause): pairs shown faster than they came, then late,
+    // 13 - 5 - 5 ms for a second. Another pace after the rest is still found within six frames (the median, below).
+    void Restart(double stamp) { moment = stamp; before = 0.0; known = std::min(known, 8u); off_beat = 0; }
+
+    // Round 91 (the smoothness tests, tests\smooth): a moment put back onto its stamp in one step squeezed or
+    // stretched the pair it ends. Measured on the screen with the game going from 40 to 55 FPS: the clock still on
+    // 25 ms ran ahead of the frames, and every second or third pair the moment fell back onto the stamp - the pair's
+    // two frames in between and its real frame shown within 1.6 ms, the picture leaping, for a second and more.
+    // Now a pair is never shorter than half the beat nor longer than twice it; what is left of the way to the stamp
+    // the next frames take up, a little each (the "on the beat" branch below pulls the clock to the stamps).
+    // Round 93 - how far a stamp is believed (the owner: "the game slows down and speeds up for some reason").
+    // A stamp is the game's moment plus the capture's own noise. Measured (tests\smooth, SM_STAMPS=1): a game presenting
+    // every 25.00 ms had stamps 28.2, 21.8, 25.6, 24.5 ms apart - the compositor's turn, 1.4 ms of noise and now and
+    // then 3 to 6. Such noise is undone by the next stamp (a late one is followed by a short span), and the clock was
+    // made to hold its beat against it: a twentieth of the way to each stamp. But a game whose frames really come
+    // unevenly (a full card: 25 +-4 ms, each on its own) drifts off any even beat for good, a little more each
+    // frame, and a clock that follows a twentieth a frame was 7 ms behind it on average: the picture 31 to 48 ms
+    // behind the game, wandering - shown slower, then faster, the game's own speed never.
+    // The two are told apart by the spans themselves: noise on the stamps is undone from one span to the next, so
+    // twelve spans together are no further off than one - nor is a pattern that comes round every two, three, four
+    // or six frames (a game 12, 21, 33 ms apart, round 56: held to an even beat); true unevenness adds up, twelve
+    // times one span's. From the
+    // two shares the gain that follows best is the steady Kalman one; never under the old twentieth, never over a
+    // half (a game may smooth its own step - then the stamps are less even than what it shows).
+    double tr_mean = 0.0, tr_one = 0.0, tr_eight = 0.0, tr_devs[12] = {};
+    unsigned tr_n = 0;
+    double Trust(double span)
+    {
+        static const int fixed = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_CLOCK_TRUST", v, sizeof(v)) > 0 ? atoi(v) : -1; }();
+        if (tr_mean <= 0.0 || std::fabs(span - tr_mean) > 0.6 * tr_mean) { tr_mean = span; tr_n = 0; tr_one = tr_eight = 0.0; }
+        tr_mean += (span - tr_mean) / 64.0;
+        const double dev = span - tr_mean;
+        tr_devs[tr_n % 12] = dev;
+        ++tr_n;
+        tr_one += (dev * dev - tr_one) / 96.0;
+        if (tr_n >= 12)
+        {
+            double sum = 0.0;
+            for (const double d : tr_devs) sum += d;
+            tr_eight += (sum * sum - tr_eight) / 96.0;
+        }
+        if (fixed >= 0) return std::clamp(fixed / 100.0, 0.0, 1.0);       // (tests: a gain given, percent)
+        if (tr_n < 96) return 0.05;                                        // (not known yet: as it always was)
+        const double walk = std::max((tr_eight - tr_one) / 11.0, 0.0), noise = std::max((tr_one - walk) / 2.0, 0.0);
+        // (Capped at 0.35: the capture's own lateness comes in runs too - measured against the game's true Presents,
+        // tests\smooth\stamptruth.py: a frame reaches the engine 5 ms after the game showed it, and every fourth one
+        // 16 ms after, by the compositor's turn - and runs look like unevenness. A third of the way a frame follows a
+        // truly uneven game three times closer than a twentieth did, and lets a third of such noise through at most.)
+        // Round 95, "Even pacing" (fixed_beat) on - the owner: "Lossless Scaling makes the game itself smoother; I do
+        // not want all these oscillations in the frame time line": a tenth at most. The game's frames reach the
+        // desktop 14 to 18 ms apart while its world moves on evenly (The Witcher 3 at 63 FPS: 7% of spread); followed a
+        // third of the way, every one of those changes was in the time between the frames shown, times the multiplier
+        // - Presents 4.84 to 5.67 ms at x3, against 5.04 to 5.48 followed a twentieth of the way.
+        const double most = SmoothOn() ? 0.05 : EvenOn() ? 0.10 : 0.35;   // (round 96, Ultra Smooth: a twentieth - the delay it keeps in hand is there for what the clock no longer follows)
+        if (noise <= 1e-12) return walk > 1e-10 ? most : 0.05;
+        const double q = walk / noise;
+        return std::clamp(0.5 * (-q + std::sqrt(q * q + 4.0 * q)), 0.05, most);
+    }
+
+    double Bounded(double target) const
+    {
+        if (every <= 0.0 || before <= 0.0) return target;
+        // (Round 93: no longer "nor longer than twice it" - a frame the game brought late (a hitch) IS that late, and
+        // held to two beats its moment lay 10 ms before its stamp: the frames after it all "came late" by that, and the
+        // delay went up for them - seconds of every picture later after each hitch.)
+        return std::max(target, before + 0.5 * every);
+    }
 
     double Moment(double stamp, double span, double hz)
     {
@@ -360,17 +449,57 @@ static struct FgClock
         // that lie within three tenths of each other (or one refresh of the
         // screen, whose grid the stamps lie on) and a tenth off the pace are
         // the new pace.
+        // Round 91: by their median, from six frames on - the stamps of a capture come 13 to 23 ms apart for a game
+        // at 18 ms (the screen's grid and the capture's own jitter), so "all eight within three tenths of each other"
+        // was never true and a new pace was only crept towards, three hundredths a frame: a second and more of
+        // moments a third off (see Bounded). Most of them near their median and a tenth off the pace: the new pace.
+        // Round 93: and by their mean - the pace IS the frames' mean, whatever their pattern (the sum of the spans is
+        // the time gone by). A game 12, 21, 33 ms apart (22 on average) taken up after one at 18 ms kept the 18: its
+        // median is 21, "near enough", and its 33s were never averaged in (off the beat, taken for frames left out) -
+        // every sixth pair a double step (tests\smooth, gta@). The mean of eight a tenth off the pace for sixteen
+        // frames running, to one side (a hitch alone is in the eight for eight): the pace.
         if (filled == 8)
         {
-            double least = spans[0], most = spans[0], sum = 0.0;
-            for (const double s : spans) { least = std::min(least, s); most = std::max(most, s); sum += s; }
-            const double recent = sum / 8.0;
-            if (most - least <= std::max(0.3 * recent, 1.05 * grid) && std::fabs(recent - every) > 0.1 * every)
+            double sum = 0.0;
+            for (const double s : spans) sum += s;
+            const double mean = sum / 8.0;
+            const int side = mean > every * 1.1 ? 1 : mean < every * 0.9 ? -1 : 0;
+            mean_off = side != 0 && side == mean_side ? mean_off + 1 : side != 0 ? 1 : 0;
+            mean_side = side;
+            if (mean_off >= 16 && mean > 0.0015 && mean < 0.25)
             {
-                every = recent;
+                every = mean;
+                known = 8; off_beat = 0; mean_off = 0; median_off = 0; drift_run = 0;
+                moment = Bounded(stamp);
+                if (moment <= before) moment = before + 0.001;
+                return moment;
+            }
+        }
+        if (filled >= 6)
+        {
+            double sorted[8];
+            std::copy(spans, spans + filled, sorted);
+            std::sort(sorted, sorted + filled);
+            const double median = sorted[filled / 2];
+            const double near_by = std::max(0.3 * median, 1.05 * grid);
+            unsigned agree = 0;
+            for (unsigned i = 0; i < filled; ++i) if (std::fabs(spans[i] - median) <= near_by) ++agree;
+            // (Round 92: and so for eight frames in a row, to the same side. The owner, GTA V at 45 - 55 FPS with DLSS
+            // MFG: "the frames in between much less smooth" - a game whose frames come a few milliseconds apart from
+            // each other moves the median of eight a tenth now and then, and each time the pace was taken anew and the
+            // moments put back onto the stamps: the stand-in at 48 FPS +-3 ms, x4, moments a quarter off 5.4 -> 7.4%.
+            // A pace that really changed stays changed; a game that only wavers does not.)
+            const int side = median > every * 1.12 ? 1 : median < every * 0.88 ? -1 : 0;
+            const bool other = agree + 2 >= filled && median > 0.0015 && median < 0.25 && side != 0;
+            median_off = other && side == median_side ? median_off + 1 : other ? 1 : 0;
+            median_side = other ? side : 0;
+            if (median_off >= 8)
+            {
+                every = median;
                 known = 8;
                 off_beat = 0;
-                moment = stamp;
+                median_off = 0;
+                moment = Bounded(stamp);
                 if (moment <= before) moment = before + 0.001;
                 return moment;
             }
@@ -382,16 +511,61 @@ static struct FgClock
         // before that.
         const double slack = known >= 30 ? std::max(grid, 0.25 * every) : grid;
         const double off = stamp - (moment + every);
+        // Round 92: another pace, told by how it pulls: the stamps fall away from the clock to one side, further with
+        // every frame (a game going from 40 to 55 FPS: 7, 14, 20 ms before the clock). A game that only wavers lies
+        // to either side by turns, and a frame it left out is one frame off once, not more each time. Three frames
+        // falling further away, each a third of a frame off or more: the pace of the last four, at once (waiting for
+        // the median of eight, above, it was 19 - 28% of the moments a quarter off for a second).
+        {
+            const int drift = off > 0.3 * every ? 1 : off < -0.3 * every ? -1 : 0;
+            // (Not "further each time": the frame that catches up - Bounded - comes nearer once, and the run began
+            // anew there, two pairs at the old pace and one squeezed, for a third of a second. Three to one side
+            // a third of a frame off is enough - a wavering game is not that far, that long, to one side.)
+            drift_run = drift != 0 && drift == drift_side ? drift_run + 1 : drift != 0 ? 1 : 0;
+            drift_side = drift;
+            drift_off = off;
+            if (drift_run >= 3 && filled >= 4)
+            {
+                double last[4];
+                for (unsigned k = 0; k < 4; ++k) last[k] = spans[(next + 8 - 1 - k) % 8];
+                std::sort(last, last + 4);
+                const double recent = 0.5 * (last[1] + last[2]);
+                drift_run = 0;
+                // (Only a pace of their own, a tenth off the clock's: frames that waver to one side for a while at the
+                // old pace - the capture's grid and the game's own unevenness together - move the clock as before.)
+                // (A fifth: the middle of four spans of a game at 48 +-3 ms on a 5 ms grid is a tenth off now and then -
+                // taken for a pace, it was 1.5% more of the moments a quarter off. 40 -> 55 FPS is 27%; a smaller
+                // change is the median of eight's, above.)
+                if (recent > 0.0015 && recent < 0.25 && std::fabs(recent - every) > 0.2 * every)
+                {
+                    every = recent;
+                    known = 8; off_beat = 0; median_off = 0;
+                    moment = Bounded(stamp);
+                    if (moment <= before) moment = before + 0.001;
+                    return moment;
+                }
+            }
+        }
         // Left-out frames: whole beats later.
         const double beats = std::round(off / every);
         const double rest = off - beats * every;
         // (Round 56: also while the pace is being learnt - held to one refresh then, a game whose frames come 12, 21,
         // 33 ms apart never got through its first thirty: every frame "another pace", the clock its stamps.)
-        if (std::fabs(off) <= std::max(slack, kClockHold * every))
+        // Round 95, "Even pacing" (fixed_beat): a frame up to a whole frame late keeps the beat (SM_CLOCK_HOLD=<percent>
+        // to compare; 60: as without it). The Witcher 3 at 63 FPS draws a frame of 20 - 21 ms once or twice a second
+        // (PresentMon: none over 22), the capture's own turn adds 4 or 5, and 10 ms late was "off the beat": the clock
+        // took the stamp, and that pair's frames stood 8.6 ms apart where the others are 5.2 - three long gaps and the
+        // picture at six tenths of its speed for one pair, 1.4 to 2.8 times a second (frames.log; the owner's "the
+        // game slows down and speeds up"). On the beat the frame only comes later than its moment - what the delay
+        // is there for - and the picture goes on evenly, as Lossless Scaling's does.
+        static const double hold_given = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_CLOCK_HOLD", v, sizeof(v)) > 0 ? atoi(v) / 100.0 : 0.0; }();
+        const double hold = hold_given > 0.0 ? hold_given : EvenOn() ? 1.0 : kClockHold;
+        if (off <= std::max(slack, hold * every) && -off <= std::max(slack, kClockHold * every))
         {
-            // On the beat: the pace follows the frames slowly, the clock the stamps slowly.
+            // On the beat: the pace follows the frames slowly, the clock the stamps - how fast, Trust says.
+            const double trust = Trust(span);
             every += (known < 30 ? 0.1 : 0.03) * (span - every);
-            moment += every + (known < 30 ? 0.12 : 0.05) * off;
+            moment += every + (known < 30 ? 0.12 : trust) * off;
             if (known < 1000) ++known;
             off_beat = 0;
         }
@@ -409,9 +583,11 @@ static struct FgClock
             recent = filled >= 4 ? recent / filled : span;
             every = recent > 0.0015 && recent < 0.25 ? recent : every;
             known = 1; off_beat = 0;
-            moment = stamp;
+            // (Round 91: onto the stamp only across a real break - more than three and a half frames off; else
+            // within half and twice a beat of the frame before, Bounded.)
+            moment = std::fabs(off) > 3.5 * every ? stamp : Bounded(stamp);
         }
-        else moment = stamp;        // one odd frame: shown at its own time, the pace kept
+        else moment = Bounded(stamp);   // one odd frame: towards its own time, the pace kept (round 91: never a squeezed pair)
         if (moment <= before) moment = stamp > before ? stamp : before + 0.001;
         return moment;
     }

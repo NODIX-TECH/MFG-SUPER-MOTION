@@ -5,7 +5,14 @@
 static int ShownCap()
 {
     const int limit = smOpt.frame_limit.load();
-    return (limit < 20 || limit > 360) ? 0 : limit;
+    int cap = (limit < 20 || limit > 360) ? 0 : limit;
+    // Round 88r: "Limit to refresh rate" - the Frame limit at the screen's own refresh (the lower of the two when both).
+    if (smOpt.screen_limit.load() != 0)
+    {
+        const int screen = static_cast<int>(std::lround(OutputRefresh()));
+        if (screen >= 24 && screen <= 1000) cap = cap > 0 ? std::min(cap, screen) : screen;
+    }
+    return cap;
 }
 
 // The frame limit's capture side: wait until the next picture may be taken.

@@ -88,6 +88,20 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let mutable startupError = false
     let mutable hotkeyValue = initial.Hotkey
     let mutable capturingHotkey = false
+    // Round 84: the engine's shaders being made for this PC (once after each update) - said in the status line.
+    let mutable preparingShaders = false
+    // Round 93: hardware monitors found running when START MOTION was pressed (MSI Afterburner, RTSS) - measured with the
+    // engine's smoothness tests: with them running the card stalls 11 to 17 ms about once a second (a micro stutter each
+    // time), with them closed it does not. Named in the status note while the engine runs.
+    let mutable monitorsFound = ""
+    let findMonitors () =
+        if OperatingSystem.IsLinux() then ""
+        else
+            try
+                [ "MSIAfterburner", "MSI Afterburner"; "RTSS", "RivaTuner (RTSS)" ]
+                |> List.filter (fun (exe, _) -> let found = Process.GetProcessesByName exe in (for p in found do p.Dispose()); found.Length > 0)
+                |> List.map snd |> String.concat " + "
+            with _ -> ""
     // A message to the developer (Help, round 47): sent only by its button.
     let mutable feedbackText = ""
     let mutable feedbackAttach = false
@@ -99,12 +113,27 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         let text = text ()
         [| ChoiceItem(text.Light); ChoiceItem(text.Dark); ChoiceItem(text.System) |]
     let upscalers = Array.init Preferences.upscalers (fun _ -> ChoiceItem(""))
+    // Round 88o/88p: the list's places -> the engine's kinds of upscaler (Off first, SMSR 1.0 under it - the owner's word).
+    let upscalerOrder = [| 0; 5; 1; 2; 3; 4 |]
     let windowModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     let countdowns = Preferences.countdowns |> Array.map (fun _ -> ChoiceItem(""))
     let gpuPriorities = [| ChoiceItem(""); ChoiceItem("") |]
 
     // The engine's sync modes, by their numbers: off, default, VSync on every, every second, every third refresh.
     let syncModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("VSync"); ChoiceItem("VSync ½"); ChoiceItem("VSync ⅓") |]
+    // Round 79: the FPS counter off, on, or with its frame time line.
+    let counterModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
+    let counterSizePercents = [| 50; 75; 100; 125; 150; 200 |]
+    let counterSizes = counterSizePercents |> Array.map (fun p -> ChoiceItem(sprintf "%d%%" p))
+    // (Round 99: the Triangle Mesh's settings - numbers, the same in every language; made once.)
+    let triPitchItems = Preferences.triPitches |> Array.map (fun p -> ChoiceItem(sprintf "%d px" p))
+    let triRoundItems = Preferences.triRounds |> Array.map (fun p -> ChoiceItem(string p))
+    let triFineItems = Preferences.triFines |> Array.map (fun p -> ChoiceItem(string p))
+    let triFullItems = Preferences.triFulls |> Array.map (fun p -> ChoiceItem(string p))
+    let triHomeItems = Preferences.triHomes |> Array.map (fun p -> ChoiceItem(if p = 0 then "Off" else sprintf "%d px" p))
+    let triRangeItems = [| ChoiceItem("1"); ChoiceItem("2"); ChoiceItem("3") |]
+    let triExactItems = Preferences.triExacts |> Array.map (fun p -> ChoiceItem(string p))
+    let triRelaxItems = Preferences.triRelaxes |> Array.map (fun p -> ChoiceItem(string p))
     let motionSources = [| ChoiceItem("DLSS MFG"); ChoiceItem("NVIDIA Optical Flow"); ChoiceItem("") |]
     let xessMotionSources = [| ChoiceItem("XeSS MFG"); ChoiceItem(""); ChoiceItem("NVIDIA Optical Flow") |]
     let msmSearches = [| ChoiceItem("SMFG"); ChoiceItem("") |]
@@ -112,17 +141,19 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let dlssPresets = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     // Performance (preset C) picked: the page shows why it is not advised.
     let presetCPicked = Event<unit>()
-    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.1" |]
+    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.3"; "SMAI 1.0" |]
     let gameTypes = [| ChoiceItem(""); ChoiceItem("2D"); ChoiceItem("2.5D"); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     let labelChoices () =
         let text = text ()
-        upscalers[0].Label <- text.Off; upscalers[1].Label <- text.SharpnessOnly
-        upscalers[2].Label <- "Integer"; upscalers[3].Label <- "Nearest Neighbor"; upscalers[4].Label <- "Anime4K"
+        // (Round 88o: in the list's order - Off, then SMSR 1.0 (88p); the engine's own numbers in upscalerOrder.)
+        let named = [| text.Off; text.SharpnessOnly; "Integer"; "Nearest Neighbor"; "Anime4K"; "SMSR 1.0" |]
+        upscalerOrder |> Array.iteri (fun i kind -> upscalers[i].Label <- named[kind])
         windowModes[0].Label <- text.Borderless; windowModes[1].Label <- text.Scaled; windowModes[2].Label <- text.Windowed
         countdowns |> Array.iteri (fun i item -> item.Label <- String.Format(text.Seconds, Preferences.countdowns[i]))
         gpuPriorities[0].Label <- text.Realtime; gpuPriorities[1].Label <- text.Normal
 
         syncModes[0].Label <- text.SyncOff; syncModes[1].Label <- text.Default
+        counterModes[0].Label <- text.Off; counterModes[1].Label <- text.CounterOn; counterModes[2].Label <- text.CounterAdvanced
         motionSources[2].Label <- text.GpuEstimate
         xessMotionSources[1].Label <- text.GpuEstimate
         msmSearches[1].Label <- sprintf "SMFG · %s" text.Fast
@@ -153,10 +184,19 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let mutable cards: CardInfo array = [||]
     /// What the PC said of VRR at this start (engine "--vrr"); Reset takes it too.
     let mutable systemVrr: bool option = None
-    let runsOn generator (card: CardInfo) = match generator with | 0 -> card.Dlss | 1 -> card.Xess | _ -> true
+    // (Round 88c, SMAI: SMFG Net through DirectML - any DirectX 12 card but Windows' software one.)
+    let runsOn generator (card: CardInfo) =
+        match generator with
+        | 0 -> card.Dlss
+        | 1 -> card.Xess
+        | 3 -> not (card.Name.Contains("Basic Render", StringComparison.OrdinalIgnoreCase))
+        | _ -> true
     let cardNames generator = cards |> Array.filter (runsOn generator) |> Array.map _.Name
+    // Round 73: on Linux the one generator is SMFG (the Vulkan layer): NVIDIA and Intel ship their frame generation
+    // for Windows only.
+    let isLinux = OperatingSystem.IsLinux()
     let generatorIds (options: DisplayOptions) =
-        let all = [| 0 .. Preferences.generators - 1 |]
+        let all = if isLinux then [| 2 |] else [| 0 .. Preferences.generators - 1 |]
         // (A card saved with the profile that the generator saved with it cannot run on counts as "Auto".)
         match cards |> Array.tryFind (fun c -> c.Name = options.Gpu && runsOn options.Generator c) with
         | Some card -> all |> Array.filter (fun g -> runsOn g card)
@@ -194,15 +234,15 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         changed
     let notifyLists () =
         let lists = refreshLists ()
-        notify (lists @ [ "GeneratorIndex"; "GpuIndex" ])
-        if not lists.IsEmpty then post (fun () -> if not disposed then notify [ "GeneratorIndex"; "GpuIndex" ])
+        notify (lists @ [ "GeneratorIndex"; "GpuIndex"; "GpuName" ])
+        if not lists.IsEmpty then post (fun () -> if not disposed then notify [ "GeneratorIndex"; "GpuIndex"; "GpuName" ])
     let notifyOptions () =
         notifyLists ()
-        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "OverSharpness"; "OverSharpnessLabel"
+        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "IsSmai"; "IsOwnGenerator"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "IsCustomMultiplier"; "CustomMultiplier"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "SmsrEnabled"; "SmsrStrength"; "SmsrStrengthLabel"; "IsSmsrOn"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "Bloom"; "BloomLabel"; "IsBloomOn"; "BloomWide"; "BloomWideLabel"; "OverSharpness"; "OverSharpnessLabel"; "StretchEnabled"
                  "CaptureApiIndex"; "WindowModeIndex"; "CountdownIndex"; "QueueTargetIndex"
                  "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "GameFpsText"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
-                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "MsmAiEnabled"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "LearningStatus"
-                 "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "FpsCounterEnabled"; "StatusNote"; "HasStatusNote" ]
+                 "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "MsmAiEnabled"; "XessTensorEnabled"; "IsXessTensorShown"; "HudAiEnabled"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "AmlGuideEnabled"; "LearningStatus"
+                 "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "EvenPacingEnabled"; "UltraSmoothEnabled"; "TriangleMeshEnabled"; "IsTriangleMeshShown"; "IsTriangleMeshOpen"; "TriPitchIndex"; "TriRoundsIndex"; "TriFineIndex"; "TriFullIndex"; "TriHomeIndex"; "TriRangeIndex"; "TriExactIndex"; "TriRelaxIndex"; "FpsCounterEnabled"; "FpsCounterModeIndex"; "FpsCounterSizeIndex"; "LockRefreshEnabled"; "StatusNote"; "HasStatusNote" ]
     let notifyEngine () = notify [ "IsMotionActive"; "IsMotionWaiting"; "IsMotionRunning"; "MotionButtonText"; "StatusText"; "HasStatus"; "StatusNote"; "HasStatusNote"; "LearningStatus" ]
     // What Adaptive Motion Learning keeps, game by game (Settings): read when the page is opened, and again when
     // one is deleted or the engine says a game got further.
@@ -230,7 +270,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let sendTimer = new Timer((fun _ -> post (fun () -> if not disposed then engine.Send selected.Options)), null, Timeout.Infinite, Timeout.Infinite)
     let sendOptions () = if engine.IsActive then sendTimer.Change(200, Timeout.Infinite) |> ignore
     let updateOptions update =
-        let next = update selected.Options |> Preferences.normalizeOptions
+        let asked = update selected.Options
+        let next = asked |> Preferences.normalizeOptions
+        // (Round 88g: a choice the rules took back - x6 with XeSS on the tensor cores - shown back as what it is, after the box's own change.)
+        if selected.Options = next && asked <> next then Avalonia.Threading.Dispatcher.UIThread.Post(fun () -> notifyOptions ())
         if selected.Options <> next then
             if engine.IsActive && next.Generator <> selected.Options.Generator then engine.Stop()
             selected.Options <- next
@@ -274,7 +317,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             page <- target
             if target = "settings" then refreshLearned ()
             if target = "video" || target = "mods" then moreOpen <- true
-            notify [ "IsDisplay"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote" ]
+            notify [ "IsDisplay"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote"; "CurrentPage" ]
     let displayCommand = RelayCommand(fun () -> navigate "display")
     let videoCommand = RelayCommand(fun () -> navigate "video")
     let modsCommand = RelayCommand(fun () -> navigate "mods")
@@ -282,9 +325,12 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         moreOpen <- not moreOpen
         notify [ "IsMoreOpen" ])
     // The engine's logs that are there to send (engine.log with "Keep a log"; frames.log in a development build).
+    // (1.1.0, last page round: on Linux the engine is the layer in the game, and its log is always written - that one.)
     let feedbackLogs () =
-        let folder = System.IO.Path.GetDirectoryName engine.LogPath
-        [ engine.LogPath; System.IO.Path.Combine(folder, "frames.log") ] |> List.filter System.IO.File.Exists
+        if isLinux then [ LinuxLayer.logFile ] |> List.filter System.IO.File.Exists
+        else
+            let folder = System.IO.Path.GetDirectoryName engine.LogPath
+            [ engine.LogPath; System.IO.Path.Combine(folder, "frames.log") ] |> List.filter System.IO.File.Exists
     let sendFeedback () =
         let text = text ()
         let words = if isNull feedbackText then "" else feedbackText.Trim()
@@ -329,7 +375,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         gate <- state
         notifyGate ()
     let checkEngine () =
-        if not (EngineStore.isLocal ()) then
+        // (Linux: the engine is the layer that comes with the app - nothing to download.)
+        if not isLinux && not (EngineStore.isLocal ()) then
             let has = (EngineStore.path ()).IsSome
             if not has then setGate "checking"
             task {
@@ -345,6 +392,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                             | _ -> setGate "update"
                     | _ -> setGate (if has then "" else "failed"))
             } |> ignore
+    // (Settings, round 57: what the last check asked from there found - "" none asked | checking | latest | newer | failed.)
+    let mutable updateCheck = ""
     let checkApp () =
         task {
             let! release = Releases.latest Releases.appRepository CancellationToken.None
@@ -352,9 +401,19 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                 match release with
                 | Some found when found.Version > Releases.appVersion ->
                     appUpdate <- found.Version.ToString()
+                    if updateCheck <> "" then updateCheck <- "newer"
                     notifyGate ()
-                | _ -> ())
+                | Some _ when updateCheck <> "" -> updateCheck <- "latest"
+                | None when updateCheck <> "" -> updateCheck <- "failed"
+                | _ -> ()
+                notify [ "UpdateCheckText"; "IsUpdateChecking" ])
         } |> ignore
+    let checkUpdatesCommand = RelayCommand(fun () ->
+        if updateCheck <> "checking" then
+            updateCheck <- "checking"
+            notify [ "UpdateCheckText"; "IsUpdateChecking" ]
+            checkApp ()
+            checkEngine ())
     let downloadEngine () =
         match gateRelease with
         | Some release when gate = "required" || gate = "update" ->
@@ -373,12 +432,26 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             } |> ignore
         | _ -> checkEngine ()
     // Help: the engine's log folder opened in Explorer, for a user to send what went wrong.
-    let openLogsCommand = RelayCommand(fun () ->
+    let openFolder (folder: string) =
         try
-            let folder = AppData.path [| "Engine" |]
             System.IO.Directory.CreateDirectory folder |> ignore
-            Process.Start(ProcessStartInfo("explorer.exe", "\"" + folder + "\"", UseShellExecute = true)) |> ignore
-        with _ -> ())
+            if isLinux then Process.Start(ProcessStartInfo("xdg-open", "\"" + folder + "\"", UseShellExecute = false)) |> ignore
+            else Process.Start(ProcessStartInfo("explorer.exe", "\"" + folder + "\"", UseShellExecute = true)) |> ignore
+        with _ -> ()
+    let openLogsCommand = RelayCommand(fun () ->
+        openFolder (if isLinux then System.IO.Path.GetDirectoryName LinuxLayer.logFile else AppData.path [| "Engine" |]))
+    // Round 73, Linux: the layer's card - installed or not, for every Vulkan game or by launch options.
+    let mutable linuxEverywhere = isLinux && LinuxLayer.isEverywhere ()
+    let mutable linuxNote = ""
+    let notifyLinux () = notify [ "LinuxLayerText"; "IsLinuxInstalled"; "LinuxEverywhere"; "LinuxNote"; "HasLinuxNote" ]
+    let linuxInstallCommand = RelayCommand(fun () ->
+        linuxNote <- (match LinuxLayer.install () with Ok () -> "" | Error why -> why)
+        notifyLinux ())
+    let linuxRemoveCommand = RelayCommand(fun () ->
+        if engine.IsActive then engine.Stop()
+        linuxNote <- (match LinuxLayer.uninstall () with Ok () -> "" | Error why -> why)
+        linuxEverywhere <- LinuxLayer.isEverywhere ()
+        notifyLinux ())
     let gateDownloadCommand = RelayCommand(fun () -> downloadEngine ())
     let gateSkipCommand = RelayCommand(fun () -> if (EngineStore.path ()).IsSome then setGate "")
     do onUi (fun () -> checkEngine (); checkApp ())
@@ -439,14 +512,21 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
 
     do
         profiles |> Seq.filter (fun p -> p.Id = "default") |> Seq.iter (fun p -> p.Name <- this.Text.Default)
+        if isLinux then
+            for p in profiles do
+                if p.Options.Generator <> 2 then p.Options <- { p.Options with Generator = 2 }
         labelChoices ()
         refreshLists () |> ignore
         engine.Changed.Add(fun status ->
             post (fun () ->
                 if not disposed then
                     let further = status.Learning <> engineStatus.Learning
+                    // (Looked for once, as the engine starts.)
+                    if engineStatus.Phase = Idle && status.Phase <> Idle then monitorsFound <- findMonitors ()
                     engineStatus <- status
                     notifyEngine ()
+                    // (Linux: START MOTION installs the layer the first time.)
+                    if isLinux then notifyLinux ()
                     if further && page = "settings" then refreshLearned ()))
         // (This app's own window in front: there is no game to take at once - the countdown, as the button has it.)
         hotkey.Pressed.Add(fun oursInFront -> post (fun () -> if not disposed && not capturingHotkey then startOrStop (not oursInFront)))
@@ -469,11 +549,20 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                         if changed then
                             notifyOptions ()
                             persist ()
-                    notifyLists ())
+                    notifyLists ()
+                    this.Notify "IsXessTensorShown")
             // VRR follows the PC at each start: on when it is on for a window here (G-SYNC for windowed mode, or
             // Windows' dynamic refresh rate), off when it is not; left as it was when the engine cannot tell.
+            // (Round 61: until the person sets it in the app - then it stays as they left it. Users: "VRR turns
+            // itself off after the PC restarts" - the PC said off for windows, and every start put the switch back.)
 
             engine.QuietRtss()
+            // (Round 84: the shaders made once for this PC after each update, said while it runs - the first SMFG start
+            // stood some 13 s otherwise and looked like the app not working.)
+            if engine.ShadersNeedWarm() then
+                post (fun () -> preparingShaders <- true; notify [ "StatusNote"; "HasStatusNote" ])
+                engine.WarmShaders()
+                post (fun () -> preparingShaders <- false; notify [ "StatusNote"; "HasStatusNote" ])
             let vrr = engine.SystemVrr()
             post (fun () ->
                 match vrr with
@@ -481,7 +570,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                     systemVrr <- Some on
                     let mutable changed = false
                     for p in profiles do
-                        if p.Options.Vrr <> on then
+                        if p.Options.Vrr <> on && not p.Options.VrrChosen then
                             p.Options <- { p.Options with Vrr = on }
                             changed <- true
                     if changed then
@@ -496,7 +585,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.Text = UiText.forLanguage language
     member _.Languages = Languages.names
     member _.Themes = themes
-    member _.Modes = [| "×2"; "×3"; "×4"; "×5"; "×6" |]
+    // (Round 85, GitHub 73: "Custom" last - any multiplier typed; not on Linux, whose layer makes whole multipliers.)
+    member _.Modes = if isLinux then [| "×2"; "×3"; "×4"; "×5"; "×6" |] else [| "×2"; "×3"; "×4"; "×5"; "×6"; (text ()).GameCustom |]
     // Round 54: the mode as Lossless Scaling has it - Fixed (the multiplier) or Adaptive (a target).
     member _.FrameModes = [| "Fixed"; "Adaptive" |]
     member _.Upscalers = upscalers
@@ -534,7 +624,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                 labelChoices ()
                 video.Relabel()
                 profiles |> Seq.filter (fun p -> p.Id = "default") |> Seq.iter (fun p -> p.Name <- this.Text.Default)
-                notify [ "LanguageIndex"; "Text"; "DialogTitle"; "IsArabic"; "IsRightToLeft"; "UiFontFamily"; "NvidiaDrivers"; "AmdDrivers"; "IntelDrivers"; "GateText"; "GateActionText"; "AppUpdateText"
+                notify [ "LanguageIndex"; "Text"; "DialogTitle"; "IsArabic"; "IsRightToLeft"; "UiFontFamily"; "NvidiaDrivers"; "AmdDrivers"; "IntelDrivers"; "GateText"; "GateActionText"; "AppUpdateText"; "VersionText"; "UpdateCheckText"
                          "FrameLimitLabel"; "ShortcutLabel" ]
                 notifyLists ()
                 notifyEngine ()
@@ -585,6 +675,9 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.IsDlss = selected.Options.Generator = 0
     member _.IsXess = selected.Options.Generator = 1
     member _.IsMsm = selected.Options.Generator = 2
+    member _.IsSmai = selected.Options.Generator = 3
+    // (Round 88c: SMFG and SMAI share the engine's presenter - "Lock to refresh rate" is for both.)
+    member _.IsOwnGenerator = selected.Options.Generator = 2 || selected.Options.Generator = 3
     member _.GeneratorIndex
         with get () = generatorIds selected.Options |> Array.tryFindIndex ((=) selected.Options.Generator) |> Option.defaultValue 0
         and set value =
@@ -596,54 +689,95 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         and set value =
             if this.SetProperty(&transparency, value) then persist ()
     member _.ModeIndex
-        with get () = selected.Options.Mode
-        and set value = if value >= 0 then updateOptions (fun o -> { o with Mode = value })
+        with get () = if selected.Options.MultiplierCustom > 0 && not isLinux then 5 else selected.Options.Mode
+        and set value =
+            if value >= 0 && value <= 4 then updateOptions (fun o -> { o with Mode = value; MultiplierCustom = 0 })
+            elif value = 5 && not isLinux then
+                // (Custom starts from the whole one picked before it.)
+                updateOptions (fun o -> { o with MultiplierCustom = (if o.MultiplierCustom > 0 then o.MultiplierCustom else (o.Mode + 2) * 10) })
+    member _.IsCustomMultiplier = not selected.Options.Adaptive && selected.Options.MultiplierCustom > 0 && not isLinux
+    // The custom multiplier, a number with one decimal (1.1 to 6.0).
+    member _.CustomMultiplier
+        with get () = Nullable(decimal selected.Options.MultiplierCustom / 10m)
+        and set (value: Nullable<decimal>) =
+            if value.HasValue && value.Value >= 1.1m && value.Value <= decimal Preferences.multiplierCustomMost / 10m then
+                let tenths = int (Math.Round(value.Value * 10m))
+                updateOptions (fun o -> { o with MultiplierCustom = tenths })
     // Round 54, Adaptive MFG: the mode of its own; its target typed (30 to 1000), empty the screen's refresh.
     member _.FrameModeIndex
         with get () = if selected.Options.Adaptive then 1 else 0
         and set value = if value >= 0 then updateOptions (fun o -> { o with Adaptive = (value = 1) })
     member _.IsAdaptive = selected.Options.Adaptive
     member _.IsFixed = not selected.Options.Adaptive
-    // (Shown as a number with arrows, as Lossless Scaling's: the screen's refresh while none is set; set back to
-    // the screen's own, it follows the screen again.)
+    // (Shown as a number with arrows, as Lossless Scaling's: the screen's refresh while none is set.)
+    // (Round 85, GitHub 68: a number typed is kept as it is, the screen's own rate too. Set to the screen's rate it was
+    // kept as "none set", which the engine takes a little under the refresh - 165 typed on a 165 Hz screen gave 160.)
     member _.AdaptiveTarget
         with get () = Nullable(decimal (if selected.Options.AdaptiveFps = 0 then ScreenRate.primary () else selected.Options.AdaptiveFps))
         and set (value: Nullable<decimal>) =
             // (A number still being typed - 1, 13 of 138 - is let be; leaving the box shows what is kept.)
             if value.HasValue && value.Value >= 30m && value.Value <= 1000m then
                 let n = int (Math.Round value.Value)
-                updateOptions (fun o -> { o with AdaptiveFps = (if n = ScreenRate.primary () then 0 else n) })
+                updateOptions (fun o -> { o with AdaptiveFps = n })
     // The size frames in between are made at, for both generators: the kind of
-    // game's own value, locked, or the profile's own for "custom".
+    // game's own value, or the profile's own for "custom".
+    // (Round 85, GitHub 65: "can't change flow scale, stuck at 35% ... Game Type unlocks it, pretty bad UX". The slider
+    // is open whenever frame generation is; moved, the kind of game becomes "custom" with the value it was moved to.)
     member _.Flow
         with get () = float (Preferences.effectiveFlow selected.Options)
         and set value =
-            if Double.IsFinite value && selected.Options.GameType = Preferences.gameCustom then
-                updateOptions (fun o -> { o with Flow = int (Math.Round(Math.Clamp(value, 25., 100.) / 5.)) * 5 })
+            if Double.IsFinite value then
+                let flow = int (Math.Round(Math.Clamp(value, 25., 100.) / 5.)) * 5
+                if selected.Options.GameType = Preferences.gameCustom then updateOptions (fun o -> { o with Flow = flow })
+                elif flow <> Preferences.effectiveFlow selected.Options then
+                    updateOptions (fun o -> { o with GameType = Preferences.gameCustom; Flow = flow })
     member _.FlowLabel = sprintf "%d%%" (Preferences.effectiveFlow selected.Options)
     // Only "custom" leaves precision to the slider.
     member _.GameTypeIndex
         with get () = selected.Options.GameType
         and set value = if value >= 0 then updateOptions (fun o -> { o with GameType = value })
     member _.IsMotionPrecisionOpen = selected.Options.FrameGeneration
-    member _.IsFlowOpen = this.IsMotionPrecisionOpen && selected.Options.GameType = Preferences.gameCustom
+    member _.IsFlowOpen = this.IsMotionPrecisionOpen
     member _.UpscalerIndex
-        with get () = selected.Options.Upscaler
-        and set value = if value >= 0 then updateOptions (fun o -> { o with Upscaler = value })
+        with get () = max 0 (Array.IndexOf(upscalerOrder, selected.Options.Upscaler))
+        and set value = if value >= 0 && value < upscalerOrder.Length then updateOptions (fun o -> { o with Upscaler = upscalerOrder[value] })
+    // Round 88o: SMSR's strength, 0..200% (100: as it was trained).
+    member _.SmsrStrength
+        with get () = float (100 + selected.Options.SmsrBoost)
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with SmsrBoost = int (Math.Round(Math.Clamp(value, 0., 200.) / 5.)) * 5 - 100 })
+    member _.SmsrStrengthLabel = sprintf "%d%%" (100 + selected.Options.SmsrBoost)
+    member _.IsSmsrOn = selected.Options.Upscaler = 5
     member _.Sharpness
         with get () = float selected.Options.Sharpness
         and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Sharpness = int (Math.Round(Math.Clamp(value, 0., 100.))) })
     member _.SharpnessLabel = sprintf "%d%%" selected.Options.Sharpness
+    // Round 86: Bloom (LumeniteFX's idea, the engine's own passes) - its strength and how wide it is drawn.
+    member _.Bloom
+        with get () = float selected.Options.Bloom
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Bloom = int (Math.Round(Math.Clamp(value, 0., 100.))) })
+    member _.BloomLabel = if selected.Options.Bloom = 0 then (text ()).Off else sprintf "%d%%" selected.Options.Bloom
+    member _.IsBloomOn = selected.Options.Bloom > 0
+    member _.BloomWide
+        with get () = float selected.Options.BloomWide
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with BloomWide = int (Math.Round(Math.Clamp(value, 0., 100.))) })
+    member _.BloomWideLabel = sprintf "%d%%" selected.Options.BloomWide
     member _.OverSharpness
         with get () = float selected.Options.OverSharpness
         and set value = if Double.IsFinite value then updateOptions (fun o -> { o with OverSharpness = int (Math.Round(Math.Clamp(value, 0., 100.))) })
     member _.OverSharpnessLabel = sprintf "%d%%" selected.Options.OverSharpness
     member _.IsOverSharpnessOpen = selected.Options.Upscaler = 1
+    // Round 88n: SMSR 1.0 in play on Linux - the Upscaler's SMSR, as a switch (the layer has no other upscaler).
+    member _.SmsrEnabled
+        with get () = selected.Options.Upscaler = 5
+        and set value = updateOptions (fun o -> { o with Upscaler = (if value then 5 else 0) })
+    member _.StretchEnabled
+        with get () = selected.Options.Stretch
+        and set value = updateOptions (fun o -> { o with Stretch = value })
     member _.SpoutEnabled
         with get () = selected.Options.Spout
         and set value = updateOptions (fun o -> { o with Spout = value })
     /// The two sliders do something once an upscaler is picked.
-    member _.IsSharpnessOpen = selected.Options.Upscaler = 1 || selected.Options.Upscaler = 4
+    member _.IsSharpnessOpen = selected.Options.Upscaler = 1 || selected.Options.Upscaler = 4 || selected.Options.Upscaler = 5
 
     // Advanced: each row is one option of the engine (Models/Preferences.fs).
     member _.CaptureApiIndex
@@ -714,7 +848,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         and set value = updateOptions (fun o -> { o with LimitToScreen = value })
     member _.VrrEnabled
         with get () = selected.Options.Vrr
-        and set value = updateOptions (fun o -> { o with Vrr = value })
+        and set value = updateOptions (fun o -> { o with Vrr = value; VrrChosen = true })
     member _.SyncModeIndex
         with get () = selected.Options.SyncMode
         and set value = if value >= 0 then updateOptions (fun o -> { o with SyncMode = value })
@@ -739,6 +873,20 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             let names = cardNames selected.Options.Generator
             if not telling && value >= 0 && value <= names.Length && not engine.IsActive then
                 updateOptions (fun o -> { o with Gpu = (if value = 0 then "" else names[value - 1]) })
+    // 1.1.0 (users: "I pick the second card, start the app again, and it is back on the first"): the box goes by the
+    // card's NAME. By its place, a list handed over anew - the cards the engine names a moment after the start, and
+    // since 1.1.0 into a box inside the folded "More", which takes its list in only when it is opened - put the box
+    // back on "Auto", and that was kept as if picked. By name, a list handed over anew says nothing (null) and is not
+    // taken; "Auto" picked says its own name.
+    member _.GpuName
+        with get () : string =
+            match cardNames selected.Options.Generator |> Array.tryFind ((=) selected.Options.Gpu) with
+            | Some name -> name
+            | None -> (text ()).GameAuto
+        and set (value: string) =
+            if not (isNull value) && not telling && not engine.IsActive then
+                if value = (text ()).GameAuto then (if selected.Options.Gpu <> "" && cards.Length > 0 then updateOptions (fun o -> { o with Gpu = "" }))
+                elif cardNames selected.Options.Generator |> Array.contains value then updateOptions (fun o -> { o with Gpu = value })
     member _.MotionSourceIndex
         with get () = selected.Options.MotionSource
         and set value = if value >= 0 then updateOptions (fun o -> { o with MotionSource = value })
@@ -770,6 +918,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         with get () = selected.Options.AdaptiveFlow
         and set value = updateOptions (fun o -> { o with AdaptiveFlow = value })
     member _.IsAdaptiveFlowOpen = selected.Options.AdaptiveLearning
+    // Round 61: its lines at the top of the game while it studies one (GitHub 54) - part of it too.
+    member _.AmlGuideEnabled
+        with get () = not selected.Options.AmlGuideOff
+        and set value = updateOptions (fun o -> { o with AmlGuideOff = not value })
     member _.LearningStatus =
         if not selected.Options.AdaptiveLearning || engineStatus.Phase <> Running || engineStatus.Learning < 0 then ""
         elif engineStatus.Learning > 100 then this.Text.LearnedDone
@@ -777,16 +929,118 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.LearnedGames = learned
     member _.HasLearnedGames = learned.Count > 0
     member _.NoLearnedGames = learned.Count = 0
+    // Round 86: XeSS MFG on the tensor cores - offered only where it can run: XeSS MFG picked, and the card it runs on an
+    // RTX (the one picked, or with "Auto" any RTX of the PC; the engine itself still checks at its start).
+    member _.IsXessTensorShown =
+        selected.Options.Generator = 1 && not isLinux
+        && (match cards |> Array.tryFind (fun c -> c.Name = selected.Options.Gpu) with
+            | Some card -> card.Dlss
+            | None -> cards |> Array.exists _.Dlss)
+    // Round 85: XeSS MFG on the tensor cores (the engine keeps Intel's library on any card without them).
+    member _.XessTensorEnabled
+        with get () = selected.Options.XessTensor
+        and set value = updateOptions (fun o -> { o with XessTensor = value })
+    // Round 90: SMHUD - the HUD kept as the real frame has it, for every generator (Windows' engine; changed while it runs).
+    member _.HudAiEnabled
+        with get () = selected.Options.HudAi
+        and set value = updateOptions (fun o -> { o with HudAi = value })
     member _.MsmAiEnabled
         with get () = selected.Options.MsmAi
         and set value = updateOptions (fun o -> { o with MsmAi = value })
     member _.StillPixelsEnabled
         with get () = selected.Options.StillPixels
         and set value = updateOptions (fun o -> { o with StillPixels = value })
+    // Round 58: a fixed multiplier at an even beat of its own (on unless turned off).
+    member _.EvenPacingEnabled
+        with get () = not selected.Options.PairPacing
+        and set value = updateOptions (fun o -> { o with PairPacing = not value })
+    // Round 96: "Ultra Smooth" - the smoothest motion for a little more delay (off unless turned on; changed while it runs).
+    member _.UltraSmoothEnabled
+        with get () = selected.Options.UltraSmooth
+        and set value = updateOptions (fun o -> { o with UltraSmooth = value })
+    // Round 99: "Triangle Mesh" - SMFG's frames made by a mesh of triangles, to try against SMFG's own (off unless turned on; changed while it runs).
+    // (1.1.0, "SMT": SMFG's and DLSS MFG / XeSS MFG's are switches of their own - on for SMFG to begin with, off for them.)
+    member _.TriangleMeshEnabled
+        with get () = if selected.Options.Generator = 2 || isLinux then selected.Options.TriangleMesh else selected.Options.SmtAssist
+        and set value =
+            if selected.Options.Generator = 2 || isLinux then updateOptions (fun o -> { o with TriangleMesh = value })
+            else updateOptions (fun o -> { o with SmtAssist = value })
+    // (Its own settings, shown while it is on with SMFG - each changed while it runs.)
+    // (Round 101: DLSS MFG and XeSS MFG as well - the engine hands them the motion the triangles read. Not SMAI.)
+    member _.IsTriangleMeshShown = selected.Options.Generator <> 3
+    member _.IsTriangleMeshOpen = not isLinux && selected.Options.Generator = 2 && selected.Options.TriangleMesh
+    member _.TriPitches = triPitchItems
+    member _.TriPitchIndex
+        with get () = Preferences.triPlace Preferences.triPitches 0 selected.Options.TriPitch
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriPitch = value + 1 })
+    member _.TriRoundChoices = triRoundItems
+    member _.TriRoundsIndex
+        with get () = Preferences.triPlace Preferences.triRounds 1 selected.Options.TriRounds
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriRounds = value + 1 })
+    member _.TriFineChoices = triFineItems
+    member _.TriFineIndex
+        with get () = Preferences.triPlace Preferences.triFines 2 selected.Options.TriFine
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriFine = value + 1 })
+    member _.TriFullChoices = triFullItems
+    member _.TriFullIndex
+        with get () = Preferences.triPlace Preferences.triFulls 3 selected.Options.TriFull
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriFull = value + 1 })
+    member _.TriHomeChoices = triHomeItems
+    member _.TriHomeIndex
+        with get () = Preferences.triPlace Preferences.triHomes 4 selected.Options.TriHome
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriHome = value + 1 })
+    member _.TriRangeChoices = triRangeItems
+    member _.TriRangeIndex
+        with get () = Preferences.triPlace Preferences.triRanges 5 selected.Options.TriRange
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriRange = value + 1 })
+    member _.TriExactChoices = triExactItems
+    member _.TriExactIndex
+        with get () = Preferences.triPlace Preferences.triExacts 6 selected.Options.TriExact
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriExact = value + 1 })
+    member _.TriRelaxChoices = triRelaxItems
+    member _.TriRelaxIndex
+        with get () = Preferences.triPlace Preferences.triRelaxes 7 selected.Options.TriRelax
+        and set value = if value >= 0 then updateOptions (fun o -> { o with TriRelax = value + 1 })
 
     member _.FpsCounterEnabled
         with get () = selected.Options.FpsCounter
         and set value = updateOptions (fun o -> { o with FpsCounter = value })
+    // Round 79: 0 off, 1 the figures, 2 the figures and the frame time line.
+    member _.CounterModes = counterModes
+    member _.FpsCounterModeIndex
+        with get () = if not selected.Options.FpsCounter then 0 elif selected.Options.FpsCounterAdvanced then 2 else 1
+        and set value = updateOptions (fun o -> { o with FpsCounter = value > 0; FpsCounterAdvanced = (value = 2) })
+    // Round 85 (GitHub 71): the counter's size - "it is massive on my screen".
+    member _.CounterSizes = counterSizes
+    member _.FpsCounterSizeIndex
+        with get () = max 0 (Array.IndexOf(counterSizePercents, selected.Options.FpsCounterSize))
+        and set value = if value >= 0 && value < counterSizePercents.Length then updateOptions (fun o -> { o with FpsCounterSize = counterSizePercents[value] })
+    // Round 79: SMFG's frames on the screen's own refreshes (on unless turned off; FIX PACING.md).
+    member _.LockRefreshEnabled
+        with get () = selected.Options.LockRefresh
+        and set value = updateOptions (fun o -> { o with LockRefresh = value })
+
+    // Round 73: Linux (the Vulkan layer's card) or Windows (everything that is the Windows engine's).
+    member _.IsLinux = isLinux
+    member _.IsWindows = not isLinux
+    member this.LinuxLayerText =
+        if LinuxLayer.isOutdated () then this.Text.LinuxLayerOld
+        elif LinuxLayer.isInstalled () then this.Text.LinuxLayerReady
+        else this.Text.LinuxLayerMissing
+    member _.IsLinuxInstalled = isLinux && LinuxLayer.isInstalled ()
+    member _.LinuxLaunchOption = LinuxLayer.launchOption
+    member _.LinuxEverywhere
+        with get () = linuxEverywhere
+        and set (value: bool) =
+            if value <> linuxEverywhere then
+                match LinuxLayer.setEverywhere value with
+                | Ok () -> linuxEverywhere <- value; linuxNote <- ""
+                | Error why -> linuxNote <- why
+                notifyLinux ()
+    member _.LinuxNote = linuxNote
+    member _.HasLinuxNote = linuxNote <> ""
+    member _.LinuxInstallCommand = linuxInstallCommand
+    member _.LinuxRemoveCommand = linuxRemoveCommand
 
     // START MOTION and what the engine says back.
     member _.IsMotionActive = engineStatus.Phase <> Idle
@@ -803,11 +1057,14 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             elif engineStatus.BaseFps >= 0 && engineStatus.OutputFps >= 0 && engineStatus.Width > 0 then
                 let rate =
                     if engineStatus.Multiplier > 1 && selected.Options.Adaptive then sprintf "%d/%d FPS · Adaptive" engineStatus.BaseFps engineStatus.OutputFps
+                    elif engineStatus.Multiplier > 1 && selected.Options.MultiplierCustom > 0 && not isLinux then
+                        sprintf "%d/%d FPS · ×%d.%d" engineStatus.BaseFps engineStatus.OutputFps (selected.Options.MultiplierCustom / 10) (selected.Options.MultiplierCustom % 10)
                     elif engineStatus.Multiplier > 1 then sprintf "%d/%d FPS · ×%d" engineStatus.BaseFps engineStatus.OutputFps engineStatus.Multiplier
                     else sprintf "%d FPS" engineStatus.OutputFps
                 sprintf "%s · %d×%d · %s" rate engineStatus.Width engineStatus.Height (engineStatus.Api.ToUpperInvariant())
             elif engineStatus.Width > 0 then
                 sprintf "%s · %d×%d · %s" text.StatusRunning engineStatus.Width engineStatus.Height (engineStatus.Api.ToUpperInvariant())
+            elif isLinux then text.LinuxWaiting
             else text.StatusRunning
         | Idle ->
             match engineStatus.Error with
@@ -821,8 +1078,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.HasStatus = this.StatusText <> ""
     member _.StatusNote =
         if capturingHotkey then ""
+        elif preparingShaders then this.Text.PreparingShaders
         elif hotkey.IsTaken then this.Text.ShortcutTaken
+        // (Only with VRR on in the app, as before 1.1.0: the owner saw it with VRR off - 2026-11-13.)
         elif engineStatus.Phase = Running && engineStatus.VrrFixed && selected.Options.Vrr then this.Text.VrrFixed
+        elif engineStatus.Phase <> Idle && monitorsFound <> "" then String.Format(this.Text.MonitorNote, monitorsFound)
         else ""
     member _.HasStatusNote = this.StatusNote <> ""
     member _.MotionCommand = motionCommand
@@ -852,6 +1112,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.IsDisplay = page = "display"
     member _.IsVideo = page = "video"
     member _.IsMods = page = "mods"
+    // Round 72, App Mods (Views\ModHost.fs): the page shown - a mod's own page is "<mod id>/<page id>", and none of the
+    // app's pages is shown then - and the way there.
+    member _.CurrentPage = page
+    member _.Navigate(target: string) = if not (String.IsNullOrWhiteSpace target) then navigate target
     member _.IsMoreOpen = moreOpen
     member _.IsHelpGuideOpen
         with get () = helpGuideOpen
@@ -873,7 +1137,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             feedbackAttach <- value
             notify [ "CanSendFeedback" ]
     member _.CanAttachLog = not (List.isEmpty (feedbackLogs ()))
-    member this.FeedbackLogNote = if this.CanAttachLog then "" else this.Text.FeedbackNoLog
+    member this.FeedbackLogNote = if this.CanAttachLog then "" elif isLinux then this.Text.FeedbackNoLogLinux else this.Text.FeedbackNoLog
     member _.CanSendFeedback = not feedbackBusy && (feedbackText.Trim() <> "" || feedbackAttach)
     member _.FeedbackStatus = feedbackStatus
     member _.FeedbackAbout = Feedback.about ()
@@ -913,6 +1177,25 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.OpenLogsCommand = openLogsCommand
     member _.GateSkipCommand = gateSkipCommand
     member _.HasAppUpdate = appUpdate <> ""
+    // Settings (round 57, GitHub issue 39): the app's version and the engine's, and a look for a newer app.
+    member this.VersionText =
+        // (1.1.0, last page round: an engine built here carries no version file - "this build", where it read "-".)
+        let engineVersion =
+            match EngineStore.installed () with
+            | Some v -> v.ToString()
+            | None when isLinux -> Releases.appVersion.ToString()      // (Linux: the layer comes with the app)
+            | None when EngineStore.isLocal () -> this.Text.EngineLocal
+            | None -> "-"
+        sprintf "%s · %s %s" (Releases.appVersion.ToString()) this.Text.EngineTitle engineVersion
+    member _.CheckUpdatesCommand = checkUpdatesCommand
+    member _.IsUpdateChecking = updateCheck = "checking"
+    member this.UpdateCheckText =
+        match updateCheck with
+        | "checking" -> this.Text.UpdateChecking
+        | "latest" -> this.Text.UpToDate
+        | "newer" -> String.Format(this.Text.AppUpdate, appUpdate)
+        | "failed" -> this.Text.UpdateFailed
+        | _ -> ""
     member _.AppUpdateText = String.Format(this.Text.AppUpdate, appUpdate)
     member _.DialogTitle = if adding then this.Text.Add else this.Text.Rename
     member _.DraftName
@@ -928,6 +1211,44 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.SupportCommand = supportCommand
     member _.VideoCommand = videoCommand
     member _.ModsCommand = modsCommand
+    // Round 72, App Mods: the engine, START / STOP MOTION, the language's code, and the profile's options by the names
+    // preferences.json gives them - read and changed as text, a change going the way one by hand goes.
+    member _.ModEngine = engine
+    member _.ToggleMotion() = toggleMotion ()
+    member _.LanguageCode = (Languages.at language).Code
+    member _.OptionNames = Microsoft.FSharp.Reflection.FSharpType.GetRecordFields(typeof<DisplayOptions>) |> Array.map _.Name
+    member _.GetOptionText(name: string) =
+        Microsoft.FSharp.Reflection.FSharpType.GetRecordFields(typeof<DisplayOptions>)
+        |> Array.tryFind (fun f -> String.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun f -> match f.GetValue selected.Options with | null -> "" | v -> Convert.ToString(v, Globalization.CultureInfo.InvariantCulture))
+        |> Option.toObj
+    member _.SetOptionText(name: string, value: string) =
+        let fields = Microsoft.FSharp.Reflection.FSharpType.GetRecordFields(typeof<DisplayOptions>)
+        match fields |> Array.tryFindIndex (fun f -> String.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase)) with
+        | Some index when not (String.Equals(fields[index].Name, "Schema", StringComparison.Ordinal)) ->
+            let field = fields[index]
+            let text = if isNull value then "" else value.Trim()
+            let parsed: obj option =
+                if field.PropertyType = typeof<int> then
+                    match Int32.TryParse(text, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
+                    | true, n -> Some (box n)
+                    | _ -> None
+                elif field.PropertyType = typeof<bool> then
+                    match text.ToLowerInvariant() with
+                    | "true" | "1" | "on" | "yes" -> Some (box true)
+                    | "false" | "0" | "off" | "no" -> Some (box false)
+                    | _ -> None
+                elif field.PropertyType = typeof<string> then Some (box text)
+                else None
+            match parsed with
+            | Some v ->
+                updateOptions (fun o ->
+                    let values = Microsoft.FSharp.Reflection.FSharpValue.GetRecordFields o
+                    values[index] <- v
+                    Microsoft.FSharp.Reflection.FSharpValue.MakeRecord(typeof<DisplayOptions>, values) :?> DisplayOptions)
+                true
+            | None -> false
+        | _ -> false
     member _.MoreCommand = moreCommand
     member _.OpenLinkCommand = openLinkCommand
     member _.NvidiaDrivers = String.Format(this.Text.LinkDrivers, "NVIDIA")

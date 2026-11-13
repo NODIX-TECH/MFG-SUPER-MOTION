@@ -69,6 +69,7 @@
 #include <share.h>
 #include <string>
 #include <vector>
+#include <deque>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -94,8 +95,10 @@
 
 #include "capture_shortcuts.inl"
 #include "lf_show_relay.inl"
+#include "lf_smsr.inl"
 #include "lf_window_fill.inl"
 #include "sm_front.inl"
+#include "sm_nooverlay.inl"
 #include "lf_vrr.inl"
 #include "lf_latency.inl"
 #include "lf_counter.inl"
@@ -120,6 +123,7 @@
 #include "lf_luma.inl"
 #include "lf_pipeline.inl"
 #include "lf_ngx.inl"
+#include "lf_bloom.inl"
 #include "lf_show.inl"
 #include "xe_mfg.inl"
 #include "lf_timing.inl"
@@ -158,8 +162,40 @@ static void KeepChildrenWithUs()
         CloseHandle(job);
 }
 
+// (Round 83, a probe for tests: SM_DLL_PROBE=1 says when each DLL comes into the engine, and from whom.)
+typedef struct { USHORT Length, MaximumLength; PWSTR Buffer; } SmUnicode;
+typedef struct { ULONG Flags; const SmUnicode *FullDllName; const SmUnicode *BaseDllName; PVOID DllBase; ULONG SizeOfImage; } SmDllLoaded;
+static VOID CALLBACK SmDllProbe(ULONG reason, const SmDllLoaded *data, PVOID)
+{
+    if (reason != 1 || !data || !data->BaseDllName) return;
+    void *frames[12] = {};
+    const USHORT n = RtlCaptureStackBackTrace(0, 12, frames, nullptr);
+    char from[512] = {}; size_t at = 0;
+    for (USHORT i = 0; i < n && at < sizeof(from) - 64; ++i)
+    {
+        HMODULE m = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCWSTR>(frames[i]), &m) && m)
+        { wchar_t name[MAX_PATH] = {}; GetModuleFileNameW(m, name, MAX_PATH); const wchar_t *b = wcsrchr(name, L'\\'); at += sprintf_s(from + at, sizeof(from) - at, "%ls<", b ? b + 1 : name); }
+    }
+    Trace("[dll] %.*ls loaded, from %s", int(data->BaseDllName->Length / 2), data->BaseDllName->Buffer, from);
+}
 int wmain(int argc, wchar_t **argv)
 {
+    {
+        char v[4] = {};
+        if (GetEnvironmentVariableA("SM_DLL_PROBE", v, sizeof(v)) > 0 && v[0] == '1')
+        {
+            typedef LONG(NTAPI * RegisterFn)(ULONG, PVOID, PVOID, PVOID *);
+            static PVOID cookie = nullptr;
+            if (auto reg = reinterpret_cast<RegisterFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "LdrRegisterDllNotification")))
+                reg(0, reinterpret_cast<PVOID>(&SmDllProbe), nullptr, &cookie);
+        }
+    }
+    // (1.0.3 + one line, round 83: no other program's code in the engine by Windows' old ways in - global window hooks
+    // such as RivaTuner Statistics Server's, AppInit DLLs, IMEs. The owner: "RTSS must not touch our engine at all".)
+    { PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY none_in = {}; none_in.DisableExtensionPoints = 1;
+      SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy, &none_in, sizeof(none_in)); }
+    nooverlay::Start();   // (round 83: NVIDIA's overlay kept out - sm_nooverlay.inl)
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
     {
         typedef BOOL(WINAPI * DpiContextFn)(HANDLE);
@@ -177,7 +213,8 @@ int wmain(int argc, wchar_t **argv)
         else if (wcscmp(argv[i], L"--video") == 0 && i + 1 < argc) { video = argv[++i]; ReadStartFile(video); }
         else if (wcscmp(argv[i], L"--cards") == 0) { CardsTell(); return 0; }      // for the app's "Preferred GPU" (lf_gpu_core.inl)
         else if (wcscmp(argv[i], L"--vrr") == 0) { VrrTell(); return 0; }          // for the app's VRR switch (lf_vrr.inl)
-        else if (wcscmp(argv[i], L"--rtss-quiet") == 0) { rtss::Quiet(); return 0; }    // the app at its start: RTSS's overlay once, not twice
+        else if (wcscmp(argv[i], L"--rtss-quiet") == 0) { rtss::Quiet(); return 0; }
+        else if (wcscmp(argv[i], L"--warm-shaders") == 0) { const ULONGLONG t0 = GetTickCount64(); const int n = ShaderWarmAll(); printf("warm %d shaders %.1f s\n", n, (GetTickCount64() - t0) / 1000.0); return 0; }   // (round 84: the app, once after an update)
         else if (wcschr(argv[i], L'=') != nullptr)
         {
             char line[256] = {};
@@ -219,6 +256,16 @@ int wmain(int argc, wchar_t **argv)
         Status("@error nogpu No compatible graphics card was found");
         Status("@state stopped");
         return 1;
+    }
+    // Round 85: XeSS MFG on the tensor cores - on an RTX 20/30 the compatibility package's XeSS-FG engine (Intel's model
+    // on its own CUDA runner), reached as DLSS MFG is: from here the engine runs DLSS MFG's road with that engine in it.
+    if (XeSelected() && smOpt.xess_tensor.load())
+    {
+        const int sm = FgComputeCapability();
+        // (Round 86: every RTX - 20 and 30 on the package's own kernels, 40 and 50 by its route for them; GTX and other makers'
+        // cards have no tensor cores for it.)
+        if (sm == 75 || sm == 86 || sm == 89 || sm >= 100) { g_generator = 0; g_xess_tensor = true; Trace("[xess] XeSS MFG on the tensor cores (SM%d): the compatibility package's XeSS-FG engine", sm); }
+        else Trace("[xess] XeSS MFG on the tensor cores needs an RTX card (this card: SM%d) - Intel's library is used", sm);
     }
     // RTX 20/30: the compatibility package is in place before NGX starts and
     // before any other thread of ours runs.
