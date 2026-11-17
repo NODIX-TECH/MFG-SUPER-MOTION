@@ -21,6 +21,13 @@ struct Session
     ULONGLONG last_fresh_tick = 0;
     bool stall_pending = false;
     int show_failures = 0, source_failures = 0;
+    // [watch] timers scoped to this session.
+    ULONGLONG watch_fresh_at = 0;
+    ULONGLONG watch_reopened_at = 0;
+    ULONGLONG watch_arrived_at = 0;
+    unsigned watch_arrivals_mark = 0;
+    unsigned watch_backoff = 0;
+    unsigned watch_arrivals_seen = 0;
     // What the app was last told.
     int told_mfg = -2, told_base = -2, told_shown = -2;
     ULONGLONG told_at = 0;
@@ -94,9 +101,16 @@ static bool SessionBuild(Session &s)
     UINT luma_w = 0, luma_h = 0;
     LumaSizeFor(s.pic_w, s.pic_h, luma_w, luma_h);
     if (!LumaStart(luma_w, luma_h)) Trace("[luma] no small luma - scene cuts and repeated frames go unnoticed");
+    if (Dlss5Wanted()) Dlss5PrepareSession(s.pic_w, s.pic_h);
     lfOut.force_next = true;
     s.built = true;
     s.frame = 0;
+    s.watch_fresh_at = 0;
+    s.watch_reopened_at = 0;
+    s.watch_arrived_at = 0;
+    s.watch_arrivals_mark = g_cap_arrivals.load();
+    s.watch_backoff = 0;
+    s.watch_arrivals_seen = g_cap_arrivals.load();
     SourceTell(s);
     return true;
 }
@@ -113,6 +127,7 @@ static void SessionRelease(Session &s)
     AwaitMark(lfCore.timeline, lfCore.timeline_value, 5000);
     ShowStop();
     LumaStop();
+    Dlss5Close();
     PipelineRelease(s.pipe);
     s.built = false;
 }
@@ -379,10 +394,8 @@ static int FrameStep(Session &s)
     // over frames (they are being thrown away), after four when it hands over none (a game standing still sends
     // none - then it costs nothing but the opening); each time it changes nothing, twice as long before the next.
     {
-        static ULONGLONG fresh_at = 0, reopened_at = 0;
-        static unsigned arrivals_mark = 0, backoff = 0;
-        if (fresh_at == 0) fresh_at = now_tick;
-        if (source_fresh) { fresh_at = now_tick; arrivals_mark = g_cap_arrivals.load(); backoff = 0; }
+        if (s.watch_fresh_at == 0) s.watch_fresh_at = now_tick;
+        if (source_fresh) { s.watch_fresh_at = now_tick; s.watch_arrivals_mark = g_cap_arrivals.load(); s.watch_backoff = 0; }
         else if (SourceLive() && !g_snapshot_frozen && lfCap.has_frame)
         {
             const HWND window = lfCap.window_live ? lfCap.window : nullptr;
@@ -392,19 +405,20 @@ static int FrameStep(Session &s)
                 // (Round 89: a window of another program no one looks at holding the focus is the game in front.)
                 in_front = IsWindow(window) && !IsIconic(window) && GameInFront();
             }
-            const unsigned arrived = g_cap_arrivals.load() - arrivals_mark;
-            const ULONGLONG wait = (arrived >= 20 ? 1500ull : 4000ull) << std::min(backoff, 5u);
-            if (!in_front) fresh_at = now_tick;
-            else if (now_tick - fresh_at >= wait && now_tick - reopened_at >= wait)
+            const unsigned arrived = g_cap_arrivals.load() - s.watch_arrivals_mark;
+            const bool static_dlss5_wgc = Dlss5Wanted() && lfCap.window_live && !lfCap.window_dxgi && arrived == 0;
+            const ULONGLONG wait = (arrived >= 20 ? 1500ull : 4000ull) << std::min(s.watch_backoff, 5u);
+            if (!in_front || static_dlss5_wgc) s.watch_fresh_at = now_tick;
+            else if (now_tick - s.watch_fresh_at >= wait && now_tick - s.watch_reopened_at >= wait)
             {
                 Trace("[watch] nothing new used for %.1f s with the game in front (%u frames of the capture came meanwhile) - the source is opened again",
-                      (now_tick - fresh_at) / 1000.0, arrived);
+                      (now_tick - s.watch_fresh_at) / 1000.0, arrived);
                 g_repeat_guess = RepeatGuess();
                 FgGateForget();
                 lfOut.force_next = true;
-                reopened_at = now_tick;
-                ++backoff;
-                arrivals_mark = g_cap_arrivals.load();
+                s.watch_reopened_at = now_tick;
+                ++s.watch_backoff;
+                s.watch_arrivals_mark = g_cap_arrivals.load();
                 if (test_freeze != 0) { test_freeze = 0; Trace("[test] the fault ends with the source opened again"); }
                 if (window != nullptr) WindowStart(window);
                 else DeskStart(lfCap.w, lfCap.h);
@@ -420,19 +434,23 @@ static int FrameStep(Session &s)
     // at all", users' logs end on "0 real + 0 generated" for half a minute). Nothing is lost by it: what it showed
     // and what is under it are the same picture; with the next frame of the game it is shown again (ShowRevealOnce).
     {
-        static unsigned arrivals_seen = 0;
-        static ULONGLONG arrived_at = 0;
         const unsigned arrivals = g_cap_arrivals.load();
-        if (source_fresh) g_show_aside = false;
-        if (arrivals != arrivals_seen || arrived_at == 0 || source_fresh) { arrivals_seen = arrivals; arrived_at = now_tick; }
-        else if (now_tick - arrived_at >= 2000 && lfShow.hwnd != nullptr && lfShow.visible)
+        const bool static_dlss5_wgc = Dlss5Wanted() && lfCap.window_live && !lfCap.window_dxgi && lfCap.has_frame &&
+                                      IsWindow(lfCap.window) && !IsIconic(lfCap.window) && GameInFront();
+        if (source_fresh || static_dlss5_wgc) g_show_aside = false;
+        if (arrivals != s.watch_arrivals_seen || s.watch_arrived_at == 0 || source_fresh || static_dlss5_wgc)
+        {
+            s.watch_arrivals_seen = arrivals;
+            s.watch_arrived_at = now_tick;
+        }
+        else if (now_tick - s.watch_arrived_at >= 2000 && lfShow.hwnd != nullptr && lfShow.visible)
         {
             g_show_aside = true;
             ShowWindow(lfShow.hwnd, SW_HIDE);
             lfShow.visible = false;
             lfShow.revealed = false;
             Trace("[watch] the capture has handed over nothing for %.1f s - the output is taken away until the game's next frame",
-                  (now_tick - arrived_at) / 1000.0);
+                  (now_tick - s.watch_arrived_at) / 1000.0);
         }
     }
 
@@ -477,9 +495,8 @@ static int FrameStep(Session &s)
 
     // The motion is the generator's own business (sm_options.h, MotionGiven).
     // Asked for in the app it is found here, only while frames are made from
-    // it: NVIDIA Optical Flow, and where that did not run the engine's GPU
-    // estimate. DLSS MFG consumes it on this same GPU queue, so nothing waits
-    // on the CPU here.
+    // it: NVIDIA Optical Flow, and where that did not run the engine's GPU estimate.
+    // (DLSS 5 maintains its own full-resolution nw x nh motion + MotionSettle inside lf_dlss5.inl.)
     if (generating && MotionGiven())
     {
         if (!s.generated_before) reset = true;      // no pair across the time it was off
@@ -493,6 +510,17 @@ static int FrameStep(Session &s)
         if (!up_ok) return lfRun.gpu_lost ? 6 : 0;
     }
     s.generated_before = generating;
+
+    if (source_fresh && Dlss5Wanted())
+    {
+        if (!Dlss5Run(pipe, s.frame == 0 || reset, false) && lfRun.gpu_lost) return 6;
+        LoopBeat();
+        const ULONGLONG post_dlss5 = GetTickCount64();
+        s.last_fresh_tick = post_dlss5;
+        s.watch_fresh_at = post_dlss5;
+        s.watch_arrived_at = post_dlss5;
+        s.watch_arrivals_seen = g_cap_arrivals.load();
+    }
 
     lfShow.history_restart = s.frame == 0 || reset;
     if (ShowDirect(pipe))
@@ -636,6 +664,40 @@ static int EngineRun()
             lfOut.force_next = true;
         }
         if (redo & kRedoFg) { CloseFgResources(); g_fg.failed = false; lfOut.force_next = true; }
+        if (redo & kRedoDlss5)
+        {
+            if (Dlss5Wanted())
+            {
+                if (s.built)
+                {
+                    LoopBeat();
+                    Dlss5PrepareSession(s.pic_w, s.pic_h);
+                    LoopBeat();
+                    if (lfCap.has_frame)
+                    {
+                        const bool from_copy = Dlss5HasSourceCopy();
+                        Dlss5Run(s.pipe, !from_copy, from_copy);
+                        LoopBeat();
+                    }
+                    const ULONGLONG now_dlss5 = GetTickCount64();
+                    s.last_fresh_tick = now_dlss5;
+                    s.watch_fresh_at = now_dlss5;
+                    s.watch_arrived_at = now_dlss5;
+                    s.watch_arrivals_seen = g_cap_arrivals.load();
+                    lfOut.force_next = true;
+                    lfShow.history_restart = true;
+                }
+            }
+            else
+            {
+                if (s.built && Dlss5HasSourceCopy() && Dlss5RestoreSource(s.pipe))
+                {
+                    lfOut.force_next = true;
+                    lfShow.history_restart = true;
+                }
+                Dlss5Close();
+            }
+        }
         if (redo & kRedoSource)
         {
             Trace("[source] opening the source again for the new setting");

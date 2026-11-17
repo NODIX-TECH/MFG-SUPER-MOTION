@@ -551,7 +551,7 @@ static bool WindowStart(HWND hwnd)
         s->hdr = lfCap.display.hdr_on;
         s->pool = wgc_ns::Direct3D11CaptureFramePool::CreateFreeThreaded(
             s->device, s->hdr ? wgdx_ns::DirectXPixelFormat::R16G16B16A16Float
-                                    : wgdx_ns::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+                                    : wgdx_ns::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
         s->mailbox = std::make_shared<FrameDrop>();
         s->mailbox->latest_only = FgRequested() || LowLatencyWanted();
         if (s->mailbox->arrived) {
@@ -807,7 +807,7 @@ static bool ScreenViaWgcStart(HMONITOR monitor)
         s->hdr = lfCap.display.hdr_on;
         s->pool = wgc_ns::Direct3D11CaptureFramePool::CreateFreeThreaded(
             s->device, s->hdr ? wgdx_ns::DirectXPixelFormat::R16G16B16A16Float
-                              : wgdx_ns::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+                              : wgdx_ns::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
         s->mailbox = std::make_shared<FrameDrop>();
         s->mailbox->latest_only = true;
         if (s->mailbox->arrived)

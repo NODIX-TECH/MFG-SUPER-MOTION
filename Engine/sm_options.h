@@ -62,7 +62,23 @@ struct Options
     std::atomic<int> link{1};          // 1: frames from DLSS 5 MANAGER's LIVE FLOW when it offers them (sm_dlss5_link.inl)
     // Upscaling (lf_window_fill.inl): what is done to every frame on its way to the screen.
     std::atomic<int> smsr_strength{100}; // round 88o: SMSR's detail, percent (0..200)
-    std::atomic<int> upscaler{0};      // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K, 5 SMSR 1.0 (lf_window_fill.inl, lf_smsr.inl)
+    std::atomic<int> upscaler{0};      // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K, 5 SMSR 1.0, 6 FSR 1.0, 7 DLSS 5
+    std::atomic<int> dlss5_model{0};        // 0 Quality (Model A), 1 Fast (Model B)
+    std::atomic<int> dlss5_style{0};        // 0 Default, 1 Natural, 2 Cinematic
+    std::atomic<int> dlss5_scale{100};      // working resolution percent, 25..100 (100 = full native)
+    std::atomic<int> dlss5_passes{1};       // 1..6
+    std::atomic<int> dlss5_intensity{100};  // 0..300%
+    std::atomic<int> dlss5_tone{100};       // 0..200%
+    std::atomic<int> dlss5_structure{100};  // 0..200%
+    std::atomic<int> dlss5_skin{0};         // -100..250%
+    std::atomic<int> dlss5_denoise{5};      // 0..100% (halo reduction + denoise)
+    std::atomic<int> dlss5_edge{0};         // 0..100% (edge smoothing)
+    std::atomic<int> dlss5_keep_colors{0};  // 0..100%
+    std::atomic<int> dlss5_low_light{0};    // 0..100%
+    std::atomic<int> dlss5_bright{0};       // -100..100%
+    std::atomic<int> dlss5_contrast{0};     // -100..100%
+    std::atomic<int> dlss5_sat{0};          // -100..100%
+    std::atomic<int> dlss5_warm{0};         // -100..100%
     std::atomic<int> sharpness{50};    // how hard edges are drawn out, 0..100 - within what the picture's own contrast leaves room for
     std::atomic<int> over_sharpness{0};// 0..100 on top of that, with no such limit
     // The source.
@@ -77,6 +93,27 @@ struct Options
     std::atomic<unsigned long> owner{0};       // the app's process: its windows are never the source
 };
 static Options smOpt;
+
+// User-chosen path to nvngx_dlssnr.dll (never bundled or redistributed; picked in the app).
+static std::mutex g_dlss5_lock;
+static std::wstring g_dlss5_dll;
+static std::atomic<unsigned> g_dlss5_dll_ver{0};
+static void Dlss5SetDll(const char *utf8)
+{
+    wchar_t wide[MAX_PATH] = {};
+    if (utf8 && *utf8) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_PATH);
+    std::lock_guard<std::mutex> hold(g_dlss5_lock);
+    if (g_dlss5_dll != wide)
+    {
+        g_dlss5_dll = wide;
+        ++g_dlss5_dll_ver;
+    }
+}
+static std::wstring Dlss5GetDll()
+{
+    std::lock_guard<std::mutex> hold(g_dlss5_lock);
+    return g_dlss5_dll;
+}
 
 // Which generator makes the frames in between ("Generator" in the app):
 // DLSS MFG (lf_dlssg.inl, NVIDIA RTX cards), XeSS MFG (xe_mfg.inl, any card

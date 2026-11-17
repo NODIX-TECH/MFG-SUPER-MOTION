@@ -173,4 +173,13 @@ static double ShownRefresh();
 static int PresentCap();
 // What the app is told (sm_control.inl).
 static void Status(const char *format, ...);
+static void LoopBeat();
 static bool GuardWideShift(float &across, float &down);     // sm_guard.inl (round 53)
+// DLSS 5 (lf_dlss5.inl).
+static bool Dlss5Wanted();
+static void Dlss5WarmupStart();
+static bool Dlss5PrepareSession(UINT pic_w, UINT pic_h);
+static bool Dlss5HasSourceCopy();
+static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy = false);
+static bool Dlss5RestoreSource(Pipeline &pipe);
+static void Dlss5Close();

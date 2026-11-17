@@ -107,9 +107,8 @@ static struct UpscaleState
     bool announced = false;
 } g_up;
 
-// Every user of the ring waits for its commands before it records again (the
-// loop, the presenter, the read-backs), so sixteen sets never overlap.
-static constexpr UINT kUpscaleSets = 16;
+// Every user of the ring has enough sets in flight (with frames drawn ahead at high multipliers) that they never overlap.
+static constexpr UINT kUpscaleSets = 64;
 
 // A window that keeps its own size (round 31). The loop asks for it with the
 // window (FillSet). Such
@@ -377,6 +376,66 @@ void ScaleMain(uint3 id : SV_DispatchThreadID)
     pos -= 0.5f;                      // texel centres on whole numbers
     int2 base = int2(floor(pos));
     float2 f = pos - float2(base);
+    if (gKind == 6u)
+    {
+        // FSR 1.0 EASU with atyuwen's 12-tap cross-plus footprint optimization.
+        float3 cb = Tap(base + int2( 0, -1)), cc = Tap(base + int2( 1, -1));
+        float3 ce = Tap(base + int2(-1,  0)), cf = Tap(base + int2( 0,  0)), cg = Tap(base + int2( 1,  0)), ch = Tap(base + int2( 2,  0));
+        float3 ci = Tap(base + int2(-1,  1)), cj = Tap(base + int2( 0,  1)), ck = Tap(base + int2( 1,  1)), cl = Tap(base + int2( 2,  1));
+        float3 cn = Tap(base + int2( 0,  2)), co = Tap(base + int2( 1,  2));
+        float lb = dot(cb, kLuma), lc = dot(cc, kLuma);
+        float le = dot(ce, kLuma), lf = dot(cf, kLuma), lg = dot(cg, kLuma), lh = dot(ch, kLuma);
+        float li = dot(ci, kLuma), lj = dot(cj, kLuma), lk = dot(ck, kLuma), ll = dot(cl, kLuma);
+        float ln = dot(cn, kLuma), lo = dot(co, kLuma);
+        float2 dir = 0.0f;
+        float len = 0.0f;
+        {
+            float wf = (1.0f - f.x) * (1.0f - f.y);
+            float2 gf = float2(lg - le, lj - lb);
+            float df = max(abs(gf.x) + abs(gf.y), 1e-4f);
+            dir += gf * wf; len += wf * saturate(dot(gf, gf) / (df * df));
+            float wg = f.x * (1.0f - f.y);
+            float2 gg = float2(lh - lf, lk - lc);
+            float dg = max(abs(gg.x) + abs(gg.y), 1e-4f);
+            dir += gg * wg; len += wg * saturate(dot(gg, gg) / (dg * dg));
+            float wj = (1.0f - f.x) * f.y;
+            float2 gj = float2(lk - li, ln - lf);
+            float dj = max(abs(gj.x) + abs(gj.y), 1e-4f);
+            dir += gj * wj; len += wj * saturate(dot(gj, gj) / (dj * dj));
+            float wk = f.x * f.y;
+            float2 gk = float2(ll - lj, lo - lg);
+            float dk = max(abs(gk.x) + abs(gk.y), 1e-4f);
+            dir += gk * wk; len += wk * saturate(dot(gk, gk) / (dk * dk));
+        }
+        float dlen = dot(dir, dir);
+        dir = dlen > 1e-6f ? dir * rsqrt(dlen) : float2(1.0f, 0.0f);
+        len = len * len;
+        float stretch = 1.0f + (1.0f - len) * 0.5f;
+        float2 sc = float2(1.0f / stretch, 1.0f / (1.0f - 0.5f * len));
+        float lob = 0.5f - 0.29f * len;
+        float clp = 1.0f / lob;
+        float3 acc = 0.0f;
+        float wsum = 0.0f;
+        float3 taps[12] = { cb, cc, ce, cf, cg, ch, ci, cj, ck, cl, cn, co };
+        int2 offs[12] = { int2(0,-1), int2(1,-1), int2(-1,0), int2(0,0), int2(1,0), int2(2,0),
+                          int2(-1,1), int2(0,1), int2(1,1), int2(2,1), int2(0,2), int2(1,2) };
+        [unroll] for (int t = 0; t < 12; ++t)
+        {
+            float2 v = float2(offs[t]) - f;
+            float2 r = float2(dot(v, dir), dot(v, float2(-dir.y, dir.x))) * sc;
+            float d2 = min(dot(r, r), clp);
+            float wb = 0.4f * d2 - 1.0f;
+            float wa = lob * d2 - 1.0f;
+            wb *= wb; wa *= wa;
+            float w = (1.5625f * wb - 0.5625f) * wa;
+            acc += taps[t] * w;
+            wsum += w;
+        }
+        float3 mn4 = min(min(cf, cg), min(cj, ck));
+        float3 mx4 = max(max(cf, cg), max(cj, ck));
+        gDst[o] = float4(clamp(acc / max(wsum, 1e-4f), mn4, mx4), 1.0f);
+        return;
+    }
     float3 c[4][4];
     float l[4][4];
     [unroll] for (int y = 0; y < 4; ++y)
@@ -722,8 +781,8 @@ static int UpscaleKind()
 static bool SharpenAsked()
 {
     const int kind = UpscaleKind();
-    // (Round 88o: SMSR with it too, as the owner asked.)
-    return (kind == 1 ? smOpt.sharpness.load() > 0 || smOpt.over_sharpness.load() > 0 : (kind == 4 || kind == 5) && smOpt.sharpness.load() > 0) && !g_up.failed;
+    // (Round 88o: SMSR with it too, as the owner asked; DLSS 5 keeps optional sharpness too.)
+    return (kind == 1 ? smOpt.sharpness.load() > 0 || smOpt.over_sharpness.load() > 0 : (kind == 4 || kind == 5 || kind == 6 || kind == 7) && smOpt.sharpness.load() > 0) && !g_up.failed;
 }
 
 // How hard the output is sharpened. Left alone ("Off"): none at 1:1, full

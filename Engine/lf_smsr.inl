@@ -73,7 +73,7 @@ static void SmsrTimeTake()
     g_smsr.stamps_pending = false;
 }
 
-static constexpr UINT kSmsrSets = 16, kSmsrTable = 13;    // 9 SRVs, 4 UAVs a pass; five passes a run
+static constexpr UINT kSmsrSets = 64, kSmsrTable = 13;    // 9 SRVs, 4 UAVs a pass; five passes a run
 static constexpr DXGI_FORMAT kSmsrFeat = DXGI_FORMAT_R16G16B16A16_FLOAT, kSmsrOut = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 static void SmsrFreeTargets()

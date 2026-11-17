@@ -91,7 +91,7 @@ void MixMain(uint3 id : SV_DispatchThreadID)
 
 static struct BloomState
 {
-    static constexpr UINT kLevels = 6, kRing = 3, kPerFrame = 2 * kLevels + 1;
+    static constexpr UINT kLevels = 6, kRing = 16, kPerFrame = 2 * kLevels + 1;
     winrt::com_ptr<ID3D12RootSignature> rs;
     winrt::com_ptr<ID3D12PipelineState> pre, down, up, mix;
     winrt::com_ptr<ID3D12DescriptorHeap> heap;

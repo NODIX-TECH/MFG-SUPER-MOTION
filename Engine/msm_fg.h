@@ -672,12 +672,17 @@ void SplatMain(uint3 id : SV_DispatchThreadID)
 // ---- 6. resolve
 
 // A place nothing reached: the best word of the eight around, as a neighbour's (never as the place's own).
-uint Around(Texture2D<uint> from, int2 at, int2 last)
+uint Around(Texture2D<uint> from, int2 at, int2 last, out int count)
 {
     uint best = 0u;
+    count = 0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x)
-            best = max(best, from.Load(int3(clamp(at + int2(x, y), int2(0, 0), last), 0)));
+        {
+            const uint w = from.Load(int3(clamp(at + int2(x, y), int2(0, 0), last), 0));
+            if (w != 0u) ++count;
+            best = max(best, w);
+        }
     return best & 0x7FFFFFFFu;
 }
 
@@ -710,10 +715,19 @@ void ResolveMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     uint a = landed_a.Load(int3(id.xy, 0)), b = landed_b.Load(int3(id.xy, 0));
-    if (a == 0u && b == 0u)
+    // (Round 119: a crack in one way's splat - surrounded by six or more of the eight neighbours that were landed on -
+    // takes its neighbours' word, as a place neither way reached does.)
+    if (a == 0u)
     {
-        a = Around(landed_a, int2(id.xy), int2(m.zw));
-        b = Around(landed_b, int2(id.xy), int2(m.zw));
+        int count_a = 0;
+        const uint near_a = Around(landed_a, int2(id.xy), int2(m.zw), count_a);
+        if (b == 0u || count_a >= 6) a = near_a;
+    }
+    if (b == 0u)
+    {
+        int count_b = 0;
+        const uint near_b = Around(landed_b, int2(id.xy), int2(m.zw), count_b);
+        if (a == 0u || count_b >= 6) b = near_b;
     }
     uint rank_a, rank_b;
     float2 va, vb;
@@ -1068,6 +1082,11 @@ float3 Draw(uint2 id, float2 uv, float4 r)
             share = saturate(share + (1.0f - share) * wa * (1.0f - wb) - share * wb * (1.0f - wa));
         }
     }
+    // (Round 109: never a frame read off its picture when the other has it on screen - a clamped sample is its edge's column drawn out.)
+    const bool in_a = all(uv_a >= 0.0f) && all(uv_a <= 1.0f);
+    const bool in_b = all(uv_b >= 0.0f) && all(uv_b <= 1.0f);
+    if (!in_a && in_b) share = 1.0f;
+    else if (!in_b && in_a) share = 0.0f;
     // Round 75, the halo (n.x: pixels at most). Two frames that do not show the same there, mixed because nothing said
     // which one is right - beside the player in a turn, where the world was behind him in one of them - are read
     // softened, so far as they are mixed: a soft halo, as Lossless Scaling's frame has there, not a trace of his colour
@@ -1423,8 +1442,8 @@ static struct MsmState
     float zero_mean_now = 0.0f;     // round 86: this pair's share for Apart (MsmPair)
     static constexpr UINT kLevels = 5;          // the brightness: the size the motion is looked for at, and four halvings
     static constexpr UINT kSlots = 10;          // a pass's table: eight pictures read, two written
-    static constexpr UINT kPasses = 128;        // a pair's passes at most (x6: some 60 for the pair, 6 for each of its five frames)
-    static constexpr UINT kPairs = 8;           // tables kept for so many pairs: a list still on its way keeps its own
+    static constexpr UINT kPasses = 256;        // a pair's passes at most (x6: some 60 for the pair, 6 for each of its five frames)
+    static constexpr UINT kPairs = 32;          // tables kept for so many pairs: a list still on its way keeps its own (round 105: random black squares when a table was written again while the card still read it)
     winrt::com_ptr<ID3D12RootSignature> root;
     winrt::com_ptr<ID3D12PipelineState> luma, halve, search, refine, relax, far_away, cross_splat, cross, subpel, at_large, fill, mark, clear, splat, resolve, edge, warp, align;
     winrt::com_ptr<ID3D12DescriptorHeap> heap;
@@ -1661,7 +1680,7 @@ static bool MsmReady(UINT full_w, UINT full_h, DXGI_FORMAT format, int share)
         !make(full_w, full_h, DXGI_FORMAT_R8_UINT, s.marks[1]))
         return fail("its pictures");
     s.full_w = full_w; s.full_h = full_h; s.w = w; s.h = h; s.format = format;
-    Trace("[msm] SMFG 1.3: the motion is looked for at %ux%u (%u x %u blocks), frames in between drawn at %ux%u", w, h, s.bw[0], s.bh[0], full_w, full_h);
+    Trace("[msm] SMFG 1.4: the motion is looked for at %ux%u (%u x %u blocks), frames in between drawn at %ux%u", w, h, s.bw[0], s.bh[0], full_w, full_h);
     if (s.tune.tri > 0.0f) TriReady(full_w, full_h, format);
     return true;
 }

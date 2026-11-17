@@ -1,0 +1,10 @@
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\ModSdk.csproj.AssemblyReference.cache
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\Avalonia\Resources.Inputs.cache
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\ModSdk.GeneratedMSBuildEditorConfig.editorconfig
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\ModSdk.AssemblyInfoInputs.cache
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\ModSdk.AssemblyInfo.cs
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\ModSdk.csproj.CoreCompileInputs.cache
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\MfgSuperMotion.ModSdk.dll
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\refint\MfgSuperMotion.ModSdk.dll
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\MfgSuperMotion.ModSdk.xml
+C:\dev\ARMO\ARMO\ARMO\obj\Release\net8.0\MfgSuperMotion.ModSdk.pdb

@@ -126,6 +126,8 @@ type MotionEngine() =
     let mutable sent: (string * string) list = []
     let mutable keepLog = false          // the engine keeps its log (Settings: off)
     let mutable stopping = false
+    // (Console Link: a window named outright - the console's stream - taken at once, no countdown.)
+    let mutable targetWindow = 0UL
     let mutable cards: CardInfo array = [||]
     // Lines for the engine that are not a profile's: what it writes on the frame, in the app's language.
     let mutable texts: (string * string) list = []
@@ -163,7 +165,13 @@ type MotionEngine() =
           TriHome = Preferences.triValue Preferences.triHomes 4 options.TriHome
           TriTop = Preferences.triValue Preferences.triRanges 5 options.TriRange
           TriExact = Preferences.triValue Preferences.triExacts 6 options.TriExact
-          TriRelax = Preferences.triValue Preferences.triRelaxes 7 options.TriRelax }
+          TriRelax = Preferences.triValue Preferences.triRelaxes 7 options.TriRelax
+          Smooth = options.UltraSmooth
+          EvenPacing = not options.PairPacing
+          LowLatency = options.LowLatency
+          Vrr = options.Vrr
+          Hdr = options.Hdr
+          ScreenLimit = options.LimitToScreen }
     // (An app closed without stopping last time left the layer on: it starts off, as START MOTION shows.)
     do if linux && File.Exists LinuxLayer.configFile then
         let left = LinuxLayer.readSettings ()
@@ -259,6 +267,23 @@ type MotionEngine() =
           "counter_size", string options.FpsCounterSize
           "spout", flag options.Spout
           "upscaler", string options.Upscaler
+          "dlss5_dll", (if isNull options.Dlss5Dll then "" else options.Dlss5Dll.Trim())
+          "dlss5_model", string options.Dlss5Model
+          "dlss5_style", string options.Dlss5Style
+          "dlss5_scale", string options.Dlss5Scale
+          "dlss5_passes", string options.Dlss5Passes
+          "dlss5_intensity", string options.Dlss5Intensity
+          "dlss5_tone", string options.Dlss5Tone
+          "dlss5_structure", string options.Dlss5Structure
+          "dlss5_skin", string options.Dlss5Skin
+          "dlss5_denoise", string options.Dlss5Denoise
+          "dlss5_edge", string options.Dlss5Edge
+          "dlss5_keep_colors", string options.Dlss5KeepColors
+          "dlss5_low_light", string options.Dlss5LowLight
+          "dlss5_bright", string options.Dlss5Brightness
+          "dlss5_contrast", string options.Dlss5Contrast
+          "dlss5_sat", string options.Dlss5Saturation
+          "dlss5_warm", string options.Dlss5Warmth
           "smsr_strength", string (100 + options.SmsrBoost)
           "sharpness", string options.Sharpness
           // (Round 86: Bloom on the real frames, before any generator reads them - lf_bloom.inl.)
@@ -274,7 +299,7 @@ type MotionEngine() =
                      | 2 | 3 -> "2"
                      | _ -> (match options.MotionSource with | 1 -> "0" | 2 -> "1" | _ -> "2"))
           "window_mode", string options.WindowMode
-          "delay", string Preferences.countdowns[options.Countdown] ]
+          "delay", string (Math.Clamp(options.Countdown, 0, Preferences.countdownMax)) ]
 
     let number (text: string) =
         match Int32.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) with
@@ -289,7 +314,7 @@ type MotionEngine() =
             match parts[0] with
             | "@state" when parts.Length > 1 ->
                 match parts[1] with
-                | "picking" -> update (fun s -> { s with Phase = Picking })
+                | "picking" -> update (fun s -> { s with Phase = Picking; Countdown = -1 })
                 | "starting" -> update (fun s -> { s with Phase = Starting })
                 | "running" -> update (fun s -> { s with Phase = Running; Countdown = 0 })
                 | _ -> ()
@@ -501,6 +526,7 @@ type MotionEngine() =
                 text.AppendLine("frame_log=1") |> ignore
 #endif
                 text.Append("owner=").AppendLine(string Environment.ProcessId) |> ignore
+                if targetWindow <> 0UL then text.Append("hwnd=").AppendLine(string targetWindow) |> ignore
                 File.WriteAllText(startFile, text.ToString(), UTF8Encoding(false))
                 let info =
                     ProcessStartInfo(
@@ -527,6 +553,13 @@ type MotionEngine() =
                 lock gate (fun () -> proc <- null; sent <- [])
                 publish { EngineStatus.idle with Error = "failed" }
                 false
+
+    /// Console Link: frame generation on the console's stream window, given outright (no countdown).
+    member this.StartOnWindow(options: DisplayOptions, window: uint64) =
+        targetWindow <- window
+        let started = this.Start(options, true)
+        targetWindow <- 0UL
+        started
 
     /// Send the controls that moved since the last time.
     member _.Send(options: DisplayOptions) =

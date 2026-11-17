@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\armo.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Company>NODIX TECH</Company>
     <RootNamespace>Mfg_Super_Motion</RootNamespace>
     <Authors>NODIX TECH</Authors>
@@ -45,6 +45,20 @@
     <Content Include="..\Linux\out-linux\libmfgsm_vk.so;..\Linux\out-linux\mfgsm-video" Link="layer\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <!-- (Round 74: SMFG AI for Super Video - ncnn, the network, their licences.) -->
     <Content Include="..\Linux\out-linux\ai\*" Link="layer\ai\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <!-- Console Link (2026-11-16): the PS5 / PS4 player (Console\build.cmd makes it: libchiaki, FFmpeg's decoder) in
+       Console\ beside the program, with chiaki-ng's and FFmpeg's licences. Windows only. -->
+  <ItemGroup Condition="Exists('..\Console\build\mfgsm-console.exe')">
+    <Content Include="..\Console\build\mfgsm-console.exe;..\Console\build\avcodec-62.dll;..\Console\build\avutil-60.dll;..\Console\build\swresample-6.dll" Link="Console\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="..\Console\third_party\chiaki\COPYING" Link="Console\licenses\chiaki-ng-COPYING.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="..\Console\tools\ffmpeg\LICENSE.txt" Link="Console\licenses\FFmpeg-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- Console Link - Xbox (2026-11-16): the stream's page (Console\xbox\player.*) and xbox-xcloud-player (MIT), served to
+       an Edge window by the app. Windows only. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' != 'linux-x64'">
+    <Content Include="..\Console\xbox\player.html;..\Console\xbox\player.js;..\Console\xbox\xCloudPlayer.min.js" Link="Console\xbox\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="..\Console\xbox\xbox-xcloud-player-LICENSE.txt" Link="Console\licenses\xbox-xcloud-player-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <!-- A fresh checkout has no Engine\out yet: build it once, then take its files. -->
@@ -128,12 +142,15 @@
     <Compile Include="Infrastructure\StartupRegistration.fs" />
     <Compile Include="Infrastructure\Updates.fs" />
     <Compile Include="Infrastructure\LinuxLayer.fs" />
+    <Compile Include="Infrastructure\ConsoleLink.fs" />
+    <Compile Include="Infrastructure\XboxLink.fs" />
     <Compile Include="Infrastructure\MotionEngine.fs" />
     <Compile Include="Infrastructure\Feedback.fs" />
     <Compile Include="Infrastructure\VideoEngine.fs" />
     <Compile Include="Infrastructure\GlobalHotkey.fs" />
     <Compile Include="ViewModels\ViewModelBase.fs" />
     <Compile Include="ViewModels\SuperVideo.fs" />
+    <Compile Include="ViewModels\ConsoleLink.fs" />
     <Compile Include="ViewModels\MainViewModel.fs" />
     <Compile Include="Controls\SettingRow.fs" />
     <Compile Include="Controls\GroupFlow.fs" />

@@ -19,6 +19,21 @@ type UiText =
       SettingsDescription: string
       // 1.1.0, last page round: the Settings page's cards, and the engine's version when it is this build's own (no version file).
       SettingsGeneral: string; SettingsStartup: string; EngineLocal: string
+      // Console Link (2026-11-16): a console's picture streamed here.
+      ConsoleLink: string; ConsoleIntro: string; ConsoleYourLink: string; ConsoleCable: string; ConsoleWifi: string; ConsoleNoLink: string
+      ConsoleConsoles: string; ConsoleSearch: string; ConsoleSearching: string; ConsoleNone: string; ConsoleAddress: string
+      ConsoleReady: string; ConsoleStandby: string; ConsoleStream: string; ConsoleResolution: string; ConsoleFps: string
+      ConsoleBitrate: string; ConsoleCodec: string; ConsoleMultiplier: string; ConsoleAuto: string; ConsoleStreamMissing: string
+      ConsoleAccount: string; ConsoleSignIn: string; ConsoleSignInHelp: string; ConsolePasteHint: string; ConsoleSignInDone: string
+      ConsoleSignOut: string; ConsoleSignedIn: string; ConsoleSigningIn: string; ConsoleSignInFailed: string; ConsoleNeedsAccount: string
+      ConsolePin: string; ConsolePinHelp: string; ConsoleLinkIt: string; ConsoleLinking: string; ConsoleLinked: string; ConsoleLinkFailed: string
+      ConsolePlay: string; ConsoleStop: string; ConsoleWaking: string; ConsoleConnecting: string; ConsoleStreaming: string
+      ConsolePasscode: string; ConsolePasscodeAsked: string; ConsoleMenuHelp: string
+      ConsoleBack: string; ConsoleApply: string; ConsoleCardsBelow: string
+      ConsoleXboxAccount: string; ConsoleXboxSignInHelp: string; ConsoleXboxSignIn: string; ConsoleXboxSigningIn: string
+      ConsoleXboxSignedIn: string; ConsoleXboxSignInFailed: string; ConsoleXboxFind: string; ConsoleXboxFinding: string
+      ConsoleXboxNone: string; ConsoleXboxHelp: string; ConsoleXboxOff: string; ConsoleXboxAway: string
+      ConsoleXboxEdgeMissing: string; ConsoleXboxMenuHelp: string
       // The page that asks for support: its button, and the thanks under it.
       SupportButton: string; SupportThanks: string; SupportText1: string; SupportText2: string
       LocalOnly: string; Reset: string; Add: string; Rename: string; Delete: string
@@ -29,11 +44,11 @@ type UiText =
       StartWithWindows: string; StartMinimized: string; MinimizeToTray: string
       StartupDescription: string; StartupFailed: string; Restore: string; Exit: string
       // The engine: what the page says while it runs, and the advanced rows.
-      StatusReady: string; StatusPicking: string; StatusStarting: string; StatusRunning: string
+      StatusReady: string; StatusPicking: string; StatusPickingClick: string; StatusStarting: string; StatusRunning: string
       StatusNoWindow: string; StatusClosed: string; StatusNoGpu: string; StatusUnavailable: string
       StatusFailed: string; StatusMissing: string; VrrFixed: string; MotionHelp: string
       CaptureApi: string; WindowMode: string; Borderless: string; Scaled: string; Windowed: string
-      Countdown: string; Seconds: string; MotionGuard: string; QueueTarget: string
+      Countdown: string; CountdownDirect: string; CountdownHelp: string; Seconds: string; MotionGuard: string; QueueTarget: string
       GameType: string; GameAuto: string; GameFirstPerson: string; GameThirdPerson: string
       GameRacing: string; GameOpenWorld: string; GameCustom: string
       FrameLimit: string; ScreenLimit: string; Off: string; LowLatency: string; GpuPriority: string; PreferredGpu: string; Realtime: string
@@ -142,7 +157,14 @@ type UiText =
       HelpOptionsTitle: string; HelpMode: string; HelpGameType: string; HelpAml: string; HelpUpscaling: string; HelpStill: string
       HelpPacing: string; HelpScreen: string; HelpMotion: string; HelpCapture: string; HelpGpu: string; HelpCounter: string
       HelpObsTitle: string; HelpObs: string; HelpTroubleTitle: string; HelpTrouble: string
-      HelpKeysTitle: string; HelpLinksTitle: string; LinkDrivers: string }
+      HelpKeysTitle: string; HelpLinksTitle: string; LinkDrivers: string
+      CleanOldCache: string; CleanNow: string
+      Dlss5Dll: string; Dlss5Browse: string; Dlss5DllMissing: string; Dlss5Model: string
+      Dlss5Style: string; Dlss5StyleNatural: string; Dlss5StyleCinematic: string
+      Dlss5Scale: string; Dlss5Passes: string; Dlss5Intensity: string; Dlss5Tone: string
+      Dlss5Structure: string; Dlss5Skin: string; Dlss5Denoise: string; Dlss5Edge: string
+      Dlss5KeepColors: string; Dlss5LowLight: string; Dlss5Brightness: string
+      Dlss5Contrast: string; Dlss5Saturation: string; Dlss5Warmth: string }
 
 module UiText =
     // Only requested languages are loaded; the fixed catalog bounds this cache.

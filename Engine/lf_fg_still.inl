@@ -41,6 +41,7 @@ static bool FgStillWanted()
 
 static struct FgStillState
 {
+    static constexpr UINT kSets = 64;
     winrt::com_ptr<ID3D12RootSignature> root, show_root;
     winrt::com_ptr<ID3D12PipelineState> calm, tiles_pso, grow, show;
     winrt::com_ptr<ID3D12DescriptorHeap> heap, show_heap;
@@ -52,6 +53,7 @@ static struct FgStillState
     UINT tile = 16;               // pixels of them a tile
     UINT spread = 6;              // tiles a change spreads
     UINT tw = 0, th = 0, mw = 0, mh = 0;
+    UINT ring = 0, show_ring = 0;
     bool ready = false, failed = false, counted = false;
 } g_fg_still;
 
@@ -266,7 +268,7 @@ static bool FgStillPipelines()
         if (!make(calm, s.calm) || !make(tiles, s.tiles_pso) || !make(grow, s.grow)) return false;
         D3D12_DESCRIPTOR_HEAP_DESC heap = {};
         heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heap.NumDescriptors = 4 * 5;
+        heap.NumDescriptors = FgStillState::kSets * 4 * 5;
         heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(lfCore.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(s.heap.put())))) return false;
     }
@@ -297,7 +299,7 @@ static bool FgStillPipelines()
         if (FAILED(lfCore.device->CreateComputePipelineState(&pso, IID_PPV_ARGS(s.show.put())))) return false;
         D3D12_DESCRIPTOR_HEAP_DESC heap = {};
         heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heap.NumDescriptors = 4;
+        heap.NumDescriptors = FgStillState::kSets * 4;
         heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(lfCore.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(s.show_heap.put())))) return false;
     }
@@ -368,10 +370,12 @@ static D3D12_GPU_DESCRIPTOR_HANDLE FgStillBind(UINT set, ID3D12Resource *in0, ID
                                                ID3D12Resource *out0, ID3D12Resource *out1)
 {
     FgStillState &s = g_fg_still;
+    if (set <= 1) ++s.ring;
+    const UINT slot = ((s.ring % FgStillState::kSets) * 4 + set) * 5;
     const UINT stride = lfCore.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     auto cpu = s.heap->GetCPUDescriptorHandleForHeapStart();
     auto gpu = s.heap->GetGPUDescriptorHandleForHeapStart();
-    cpu.ptr += SIZE_T(set) * 5 * stride; gpu.ptr += UINT64(set) * 5 * stride;
+    cpu.ptr += SIZE_T(slot) * stride; gpu.ptr += UINT64(slot) * stride;
     for (ID3D12Resource *in : {in0, in1, in2})
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
@@ -515,8 +519,10 @@ static void FgStillShow(ID3D12GraphicsCommandList *list, ID3D12Resource *made, I
 {
     FgStillState &s = g_fg_still;
     const UINT stride = lfCore.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT first = (s.show_ring++ % FgStillState::kSets) * 4;
     auto cpu = s.show_heap->GetCPUDescriptorHandleForHeapStart();
     auto gpu = s.show_heap->GetGPUDescriptorHandleForHeapStart();
+    cpu.ptr += SIZE_T(first) * stride; gpu.ptr += UINT64(first) * stride;
     for (ID3D12Resource *in : {made, real, map})
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};

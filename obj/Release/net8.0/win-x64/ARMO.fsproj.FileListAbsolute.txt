@@ -351,3 +351,13 @@ C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Engine\shaders\EEEF3C357BA22BF4
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Engine\shaders\F01EC16069287849-FollowMain.cso
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Engine\shaders\F29C59A29EC95587-EstHalf.cso
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Engine\shaders\FCA9A4D86D9587FE-SubpelMain.cso
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\mfgsm-console.exe
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\avcodec-62.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\avutil-60.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\swresample-6.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\licenses\chiaki-ng-COPYING.txt
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\licenses\FFmpeg-LICENSE.txt
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\xbox\player.html
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\xbox\player.js
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\xbox\xCloudPlayer.min.js
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\win-x64\Console\licenses\xbox-xcloud-player-LICENSE.txt

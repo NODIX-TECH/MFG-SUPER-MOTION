@@ -105,6 +105,7 @@ static struct RebuildState
     bool field_read = false;                           // field, settled and wide rest readable (a pair's frames read them)
     UINT64 pair_done = ~0ull;                          // the pair they were made for
     UINT grid_w = 0, grid_h = 0, small_w = 0, small_h = 0, tiles_w = 0, tiles_h = 0;
+    UINT turn_ring = 0;
     float unit = 1.0f;
     bool ready = false, failed = false;
 } g_rebuild;
@@ -1213,7 +1214,7 @@ static bool RebuildPipelines()
         pso.CS = {code->GetBufferPointer(), code->GetBufferSize()};
         if (FAILED(lfCore.device->CreateComputePipelineState(&pso, IID_PPV_ARGS(pass.to->put())))) return fail(pass.what);
     }
-    D3D12_DESCRIPTOR_HEAP_DESC heap = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4 * 9 * 14, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
+    D3D12_DESCRIPTOR_HEAP_DESC heap = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64 * 9 * 14, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
     if (FAILED(lfCore.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(r.heap.put())))) return fail("its descriptor heap");
     return true;
 }
@@ -1356,13 +1357,14 @@ static void RebuildShow(ID3D12GraphicsCommandList *list, ID3D12Resource *made, I
 {
     RebuildState &r = g_rebuild;
     const UINT stride = lfCore.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const UINT ring_turn = r.turn_ring++ % 64;
     const auto td = target->GetDesc();
     if (map == nullptr) map = r.all_moving.get();
     auto mark = [&] { if (marks && marks->heap) list->EndQuery(marks->heap, D3D12_QUERY_TYPE_TIMESTAMP, marks->next++); };
     // A pass's twelve inputs by their places (t0..t11; null: not read by it) and its two outputs.
     auto bind = [&](UINT set, std::initializer_list<ID3D12Resource *> inputs, ID3D12Resource *first, ID3D12Resource *second) {
         auto cpu = r.heap->GetCPUDescriptorHandleForHeapStart();
-        cpu.ptr += SIZE_T((turn % 4) * 9 + set) * 14 * stride;
+        cpu.ptr += SIZE_T(ring_turn * 9 + set) * 14 * stride;
         UINT filled = 0;
         for (ID3D12Resource *in : inputs)
         {
@@ -1385,7 +1387,7 @@ static void RebuildShow(ID3D12GraphicsCommandList *list, ID3D12Resource *made, I
             lfCore.device->CreateUnorderedAccessView(out, nullptr, &uav, cpu); cpu.ptr += stride;
         }
         auto gpu = r.heap->GetGPUDescriptorHandleForHeapStart();
-        gpu.ptr += UINT64((turn % 4) * 9 + set) * 14 * stride;
+        gpu.ptr += UINT64(ring_turn * 9 + set) * 14 * stride;
         return gpu;
     };
     auto run = [&](ID3D12PipelineState *pass, D3D12_GPU_DESCRIPTOR_HANDLE table, UINT across, UINT down) {

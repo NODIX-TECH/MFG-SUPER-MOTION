@@ -684,7 +684,8 @@ static bool FrontIsGame()
     DWORD source = 0, pid = 0;
     GetWindowThreadProcessId(lfCap.window, &source);
     GetWindowThreadProcessId(front, &pid);
-    if (source == pid || pid == GetCurrentProcessId()) return true;
+    const DWORD owner = smOpt.owner.load();
+    if (source == pid || pid == GetCurrentProcessId() || (owner != 0 && pid == owner)) return true;
     // (Asked several times a frame: the answer for the same window is kept a quarter of a second.)
     static HWND last = nullptr;
     static ULONGLONG last_at = 0;

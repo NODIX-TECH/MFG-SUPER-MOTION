@@ -16,6 +16,9 @@
             <Button Name="DisplayNav" Classes="nav utility" Classes.active="{Binding IsDisplay}" Command="{Binding DisplayCommand}" AutomationProperties.Name="Super Motion">
               <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource DisplayIcon}" /><TextBlock Grid.Column="1" Text="Super Motion" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
             </Button>
+            <Button Name="ConsoleNav" Classes="nav utility" Classes.active="{Binding IsConsole}" Command="{Binding ConsoleCommand}" IsVisible="{Binding IsWindows}" AutomationProperties.Name="Console Link">
+              <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource ConsoleIcon}" /><TextBlock Grid.Column="1" Text="Console Link" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
+            </Button>
             <Button Name="SupportNav" Classes="nav utility" Classes.active="{Binding IsSupport}" Command="{Binding SupportCommand}" AutomationProperties.Name="{Binding Text.Support}">
               <Grid ColumnDefinitions="16,*"><Path Classes="nav-icon" Data="{StaticResource SupportIcon}" /><TextBlock Grid.Column="1" Text="{Binding Text.Support}" Margin="10,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
             </Button>
@@ -74,6 +77,12 @@
       <Border Name="Workspace" Grid.Column="1" />
       <ScrollViewer Name="ContentScroll" Grid.Column="1" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
         <StackPanel Name="ContentStack" Spacing="12">
+          <Border Name="CleanCacheBanner" IsVisible="{Binding NeedsCacheClean}" Background="{DynamicResource SelectionBrush}" BorderBrush="{DynamicResource AccentBrush}" BorderThickness="1" CornerRadius="12" Padding="16">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{Binding Text.CleanOldCache}" TextWrapping="Wrap" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0" />
+              <Button Name="CleanCacheButton" Grid.Column="1" Classes="primary" Content="{Binding Text.CleanNow}" Command="{Binding CleanCacheCommand}" VerticalAlignment="Center" AutomationProperties.Name="{Binding Text.CleanNow}" />
+            </Grid>
+          </Border>
           <Border Name="AppUpdateBanner" IsVisible="{Binding HasAppUpdate}" Background="{DynamicResource SelectionBrush}" CornerRadius="12" Padding="16">
             <Grid ColumnDefinitions="*,Auto">
               <TextBlock Text="{Binding AppUpdateText}" TextWrapping="Wrap" FontSize="13" VerticalAlignment="Center" Margin="0,0,16,0" />
@@ -90,8 +99,8 @@
           <!-- 1.1.0, the owner's sketch: the page's name and START at the top; Frame Generation and Upscaling side by side
                (under each other on a narrow window); Quick settings as chips; everything else under "More". Every binding
                and every named control of the page before is kept. -->
-          <Grid Name="DisplayCards" IsVisible="{Binding IsDisplay}" ColumnDefinitions="*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
-            <StackPanel Name="MotionHeader" Spacing="2" Margin="0,0,0,16">
+          <Grid Name="DisplayCards" IsVisible="{Binding IsDisplayOrConsole}" ColumnDefinitions="*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+            <StackPanel Name="MotionHeader" IsVisible="{Binding IsDisplay}" Spacing="2" Margin="0,0,0,16">
               <Grid ColumnDefinitions="*,Auto">
                 <TextBlock Classes="page-title" Text="Super Motion" />
                 <Button Name="StartMotionButton" Grid.Column="1" Classes="primary motion" Classes.waiting="{Binding IsMotionWaiting}" Classes.running="{Binding IsMotionRunning}" Content="{Binding MotionButtonText}"
@@ -100,6 +109,182 @@
               <TextBlock Name="MotionStatus" Classes="muted" Text="{Binding StatusText}" IsVisible="{Binding HasStatus}" Margin="0,4,0,0" />
               <TextBlock Name="MotionNote" Classes="muted" Text="{Binding StatusNote}" IsVisible="{Binding HasStatusNote}" Foreground="{DynamicResource AccentBrush}" />
             </StackPanel>
+          <!-- Console Link (2026-11-16, the owner): a PlayStation 5 / 4 or an Xbox Series S / X on the home network, its picture
+               shown here with frame generation on it. The page in the main page's way: its name, the platform, the consoles
+               found and how this PC is joined to the network, and the stream's settings. -->
+          <StackPanel Name="ConsolePage" Grid.Row="0" IsVisible="{Binding IsConsole}" Spacing="12" Margin="0,0,0,12">
+            <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,4">
+              <TextBlock Classes="page-title" Text="{Binding Text.ConsoleLink}" />
+              <Button Name="ConsoleIntroWhatIs" Classes="whatis" Content="?" Margin="0" VerticalAlignment="Center" ToolTip.Tip="{Binding Text.ConsoleIntro}" AutomationProperties.Name="?" />
+            </StackPanel>
+            <ListBox Name="ConsolePlatformBar" Classes="segmented" ItemsSource="{Binding ConsoleLink.Platforms}" SelectedIndex="{Binding ConsoleLink.PlatformIndex, Mode=TwoWay}" HorizontalAlignment="Center" Width="360" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsoleLink}" />
+            <ui:CardPair Name="ConsoleCards">
+              <Border Name="ConsoleFoundCard" Classes="card">
+                <StackPanel Spacing="10">
+                  <TextBlock Classes="heading" Text="{Binding Text.ConsoleConsoles}" Margin="0,0,0,4" />
+                  <Border Background="{DynamicResource SelectionBrush}" CornerRadius="10" Padding="14,10">
+                    <StackPanel Spacing="4">
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="card-label" Text="{Binding Text.ConsoleYourLink}" Margin="0" VerticalAlignment="Center" />
+                        <Button Name="ConsoleLinkWhatIs" Classes="whatis" Content="?" Margin="0" ToolTip.Tip="{Binding ConsoleLink.LinkText}" AutomationProperties.Name="?" />
+                      </StackPanel>
+                      <TextBlock Name="ConsoleLinkText" Text="{Binding ConsoleLink.LinkShort}" TextWrapping="Wrap" FontSize="13" />
+                    </StackPanel>
+                  </Border>
+                  <!-- Playing now: what, and Stop; the in-stream menu's keys. -->
+                  <Border Background="{DynamicResource AccentBrush}" CornerRadius="10" Padding="14,10" IsVisible="{Binding ConsoleLink.IsPlaying}">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding ConsoleLink.PlayingText}" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        <Button Name="ConsolePlayingWhatIs" Classes="whatis" Content="?" Margin="0" ToolTip.Tip="{Binding ConsoleLink.MenuHelp}" AutomationProperties.Name="?" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                        <Button Name="ConsoleBackButton" Classes="primary" Content="{Binding Text.ConsoleBack}" Command="{Binding ConsoleLink.BackCommand}" AutomationProperties.Name="{Binding Text.ConsoleBack}" />
+                        <Button Content="{Binding Text.ConsoleStop}" Command="{Binding ConsoleLink.StopCommand}" />
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                  <StackPanel Spacing="10" IsVisible="{Binding ConsoleLink.IsPlayStation}">
+                    <!-- The PlayStation account (a PS5's link needs its id): signed in once. -->
+                    <Border BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10">
+                      <StackPanel Spacing="10">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <TextBlock Classes="card-label" Text="{Binding Text.ConsoleAccount}" Margin="0" VerticalAlignment="Center" />
+                          <Button Name="ConsoleAccountWhatIs" Classes="whatis" Content="?" Margin="0" ToolTip.Tip="{Binding Text.ConsoleSignInHelp}" AutomationProperties.Name="?" />
+                        </StackPanel>
+                        <StackPanel Spacing="8" IsVisible="{Binding ConsoleLink.IsSignedOut}">
+                          <Button Name="ConsoleSignInButton" Classes="primary" HorizontalAlignment="Center" Content="{Binding Text.ConsoleSignIn}" Command="{Binding ConsoleLink.SignInCommand}" AutomationProperties.Name="{Binding Text.ConsoleSignIn}" />
+                          <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Name="ConsolePasteBox" Classes="field" Text="{Binding ConsoleLink.Pasted, Mode=TwoWay}" PlaceholderText="{Binding Text.ConsolePasteHint}" FlowDirection="LeftToRight" Margin="0,0,8,0" />
+                            <Button Grid.Column="1" Content="{Binding Text.ConsoleSignInDone}" Command="{Binding ConsoleLink.FinishSignInCommand}" />
+                          </Grid>
+                        </StackPanel>
+                        <Grid ColumnDefinitions="*,Auto" IsVisible="{Binding ConsoleLink.IsSignedIn}">
+                          <TextBlock Text="{Binding Text.ConsoleSignedIn}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                          <Button Grid.Column="1" Content="{Binding Text.ConsoleSignOut}" Command="{Binding ConsoleLink.SignOutCommand}" />
+                        </Grid>
+                        <TextBlock Classes="muted" Text="{Binding ConsoleLink.AccountNote}" IsVisible="{Binding ConsoleLink.HasAccountNote}" TextWrapping="Wrap" Foreground="{DynamicResource AccentBrush}" />
+                      </StackPanel>
+                    </Border>
+                    <ui:SettingRow>
+                      <TextBlock Classes="row-label" Text="{Binding Text.ConsolePasscode}" />
+                      <TextBox Name="ConsolePasscodeBox" Classes="row-control field" Width="110" HorizontalContentAlignment="Center" PlaceholderText="••••" Text="{Binding ConsoleLink.Passcode, Mode=TwoWay}" MaxLength="4" PasswordChar="•" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsolePasscode}" />
+                    </ui:SettingRow>
+                    <ui:SettingRow>
+                      <TextBlock Classes="row-label" Text="{Binding Text.ConsoleAddress}" />
+                      <TextBox Name="ConsoleAddressBox" Classes="row-control field" Width="160" Text="{Binding ConsoleLink.ManualAddress, Mode=TwoWay}" PlaceholderText="192.168.1.20" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsoleAddress}" />
+                    </ui:SettingRow>
+                    <Button Name="ConsoleSearchButton" Classes="primary" HorizontalAlignment="Center" MinWidth="200" HorizontalContentAlignment="Center" Command="{Binding ConsoleLink.SearchCommand}" IsEnabled="{Binding ConsoleLink.CanSearch}" AutomationProperties.Name="{Binding Text.ConsoleSearch}">
+                      <Panel>
+                        <TextBlock Text="{Binding Text.ConsoleSearch}" IsVisible="{Binding !ConsoleLink.IsSearching}" />
+                        <TextBlock Text="{Binding Text.ConsoleSearching}" IsVisible="{Binding ConsoleLink.IsSearching}" />
+                      </Panel>
+                    </Button>
+                    <TextBlock Classes="muted" Text="{Binding Text.ConsoleNone}" IsVisible="{Binding ConsoleLink.NoneFound}" TextWrapping="Wrap" TextAlignment="Center" />
+                    <ItemsControl Name="ConsoleList" ItemsSource="{Binding ConsoleLink.Consoles}" IsVisible="{Binding ConsoleLink.HasConsoles}">
+                      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="8" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsoleEntry">
+                          <Border Background="{DynamicResource SelectionBrush}" CornerRadius="10" Padding="14,10">
+                            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto">
+                              <Border Background="{DynamicResource AccentBrush}" CornerRadius="6" Padding="8,3" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <TextBlock Text="{Binding Kind}" FontWeight="SemiBold" FontSize="12" Foreground="White" FlowDirection="LeftToRight" />
+                              </Border>
+                              <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" FlowDirection="LeftToRight" />
+                                <TextBlock Classes="muted" Text="{Binding Address}" FlowDirection="LeftToRight" />
+                              </StackPanel>
+                              <Border Grid.Column="2" Classes="chipbox" Classes.on="{Binding IsReady}" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding StateText}" Margin="12,6" FontSize="13" FontWeight="SemiBold" />
+                              </Border>
+                              <!-- (Not linked yet: its PIN and Link; linked: Play. A word under it while it works or when it failed.) -->
+                              <Grid Grid.Row="1" Grid.ColumnSpan="3" ColumnDefinitions="*,Auto" Margin="0,10,0,0" IsVisible="{Binding IsNotLinked}">
+                                <TextBox Classes="field" Text="{Binding Pin, Mode=TwoWay}" PlaceholderText="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.ConsolePin}" ToolTip.Tip="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.ConsolePinHelp}" MaxLength="8" FlowDirection="LeftToRight" IsEnabled="{Binding IsFree}" Margin="0,0,8,0" />
+                                <Button Grid.Column="1" Classes="primary" Content="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.ConsoleLinkIt}" Command="{Binding LinkCommand}" IsEnabled="{Binding IsFree}" MinWidth="90" HorizontalContentAlignment="Center" />
+                              </Grid>
+                              <Button Grid.Row="1" Grid.ColumnSpan="3" Classes="primary" HorizontalAlignment="Center" MinWidth="160" HorizontalContentAlignment="Center" Margin="0,10,0,0"
+                                      Content="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.ConsolePlay}" Command="{Binding PlayCommand}" IsVisible="{Binding IsLinked}" IsEnabled="{Binding IsFree}" />
+                              <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Classes="muted" Text="{Binding Note}" IsVisible="{Binding HasNote}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,8,0,0" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Classes="muted" Text="{Binding Text.ConsoleStreamMissing}" IsVisible="{Binding ConsoleLink.IsStreamMissing}" TextWrapping="Wrap" TextAlignment="Center" Foreground="{DynamicResource AccentBrush}" />
+                  </StackPanel>
+                  <!-- Xbox (2026-11-16): the Microsoft account signed in once in a small Edge window, the account's consoles from
+                       Xbox's streaming service, Play. The stream plays in an Edge window; frame generation on it. -->
+                  <StackPanel Spacing="10" IsVisible="{Binding ConsoleLink.IsXbox}">
+                    <Border BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="14,10">
+                      <StackPanel Spacing="10">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <TextBlock Classes="card-label" Text="{Binding Text.ConsoleXboxAccount}" Margin="0" VerticalAlignment="Center" />
+                          <Button Name="ConsoleXboxWhatIs" Classes="whatis" Content="?" Margin="0" ToolTip.Tip="{Binding Text.ConsoleXboxSignInHelp}" AutomationProperties.Name="?" />
+                        </StackPanel>
+                        <StackPanel Spacing="8" IsVisible="{Binding ConsoleLink.IsXboxSignedOut}">
+                          <Button Name="XboxSignInButton" Classes="primary" HorizontalAlignment="Center" Content="{Binding Text.ConsoleXboxSignIn}" Command="{Binding ConsoleLink.XboxSignInCommand}" IsEnabled="{Binding ConsoleLink.CanXboxSignIn}" AutomationProperties.Name="{Binding Text.ConsoleXboxSignIn}" />
+                        </StackPanel>
+                        <Grid ColumnDefinitions="*,Auto" IsVisible="{Binding ConsoleLink.IsXboxSignedIn}">
+                          <TextBlock Text="{Binding ConsoleLink.XboxSignedInText}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                          <Button Grid.Column="1" Content="{Binding Text.ConsoleSignOut}" Command="{Binding ConsoleLink.XboxSignOutCommand}" />
+                        </Grid>
+                        <TextBlock Classes="muted" Text="{Binding ConsoleLink.XboxNote}" IsVisible="{Binding ConsoleLink.HasXboxNote}" TextWrapping="Wrap" Foreground="{DynamicResource AccentBrush}" />
+                      </StackPanel>
+                    </Border>
+                    <Button Name="XboxSearchButton" Classes="primary" HorizontalAlignment="Center" MinWidth="200" HorizontalContentAlignment="Center" Command="{Binding ConsoleLink.XboxSearchCommand}" IsEnabled="{Binding ConsoleLink.CanXboxSearch}" IsVisible="{Binding ConsoleLink.IsXboxSignedIn}" AutomationProperties.Name="{Binding Text.ConsoleXboxFind}">
+                      <Panel>
+                        <TextBlock Text="{Binding Text.ConsoleXboxFind}" IsVisible="{Binding !ConsoleLink.IsXboxSearching}" />
+                        <TextBlock Text="{Binding Text.ConsoleXboxFinding}" IsVisible="{Binding ConsoleLink.IsXboxSearching}" />
+                      </Panel>
+                    </Button>
+                    <TextBlock Classes="muted" Text="{Binding Text.ConsoleXboxNone}" IsVisible="{Binding ConsoleLink.XboxNoneFound}" TextWrapping="Wrap" TextAlignment="Center" />
+                    <ItemsControl Name="XboxList" ItemsSource="{Binding ConsoleLink.Xboxes}" IsVisible="{Binding ConsoleLink.HasXboxes}">
+                      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="8" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:XboxEntry">
+                          <Border Background="{DynamicResource SelectionBrush}" CornerRadius="10" Padding="14,10">
+                            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto">
+                              <Border Background="{DynamicResource AccentBrush}" CornerRadius="6" Padding="8,3" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <TextBlock Text="{Binding Kind}" FontWeight="SemiBold" FontSize="12" Foreground="White" FlowDirection="LeftToRight" />
+                              </Border>
+                              <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" FlowDirection="LeftToRight" />
+                              <Border Grid.Column="2" Classes="chipbox" Classes.on="{Binding IsReady}" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding StateText}" Margin="12,6" FontSize="13" FontWeight="SemiBold" />
+                              </Border>
+                              <Button Grid.Row="1" Grid.ColumnSpan="3" Classes="primary" HorizontalAlignment="Center" MinWidth="160" HorizontalContentAlignment="Center" Margin="0,10,0,0"
+                                      Content="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).Text.ConsolePlay}" Command="{Binding PlayCommand}" IsEnabled="{Binding IsFree}" />
+                              <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Classes="muted" Text="{Binding Note}" IsVisible="{Binding HasNote}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,8,0,0" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Classes="muted" Text="{Binding Text.ConsoleXboxEdgeMissing}" IsVisible="{Binding ConsoleLink.IsEdgeMissing}" TextWrapping="Wrap" TextAlignment="Center" Foreground="{DynamicResource AccentBrush}" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+              <Border Name="ConsoleStreamCard" Classes="card">
+                <StackPanel Spacing="8">
+                  <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,0,4">
+                    <TextBlock Classes="heading" Text="{Binding Text.ConsoleStream}" Margin="0" VerticalAlignment="Center" />
+                    <Button Name="ConsoleStreamWhatIs" Classes="whatis" Content="?" Margin="0" ToolTip.Tip="{Binding Text.ConsoleCardsBelow}" AutomationProperties.Name="?" />
+                  </StackPanel>
+                  <TextBlock Classes="card-label" Text="{Binding Text.ConsoleResolution}" />
+                  <ListBox Name="ConsoleResolutionBar" Classes="segmented" ItemsSource="{Binding ConsoleLink.Resolutions}" SelectedIndex="{Binding ConsoleLink.ResolutionIndex, Mode=TwoWay}" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsoleResolution}" />
+                  <TextBlock Classes="card-label" Text="{Binding Text.ConsoleFps}" Margin="0,4,0,0" IsVisible="{Binding ConsoleLink.IsPlayStation}" />
+                  <ListBox Name="ConsoleFpsBar" IsVisible="{Binding ConsoleLink.IsPlayStation}" Classes="segmented" ItemsSource="{Binding ConsoleLink.FpsChoices}" SelectedIndex="{Binding ConsoleLink.FpsIndex, Mode=TwoWay}" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsoleFps}" />
+                  <TextBlock Classes="card-label" Text="{Binding Text.ConsoleCodec}" Margin="0,4,0,0" IsVisible="{Binding ConsoleLink.IsPlayStation}" />
+                  <ListBox Name="ConsoleCodecBar" IsVisible="{Binding ConsoleLink.IsPlayStation}" Classes="segmented" ItemsSource="{Binding ConsoleLink.Codecs}" SelectedIndex="{Binding ConsoleLink.CodecIndex, Mode=TwoWay}" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.ConsoleCodec}" />
+                  <ui:SettingRow Margin="0,4,0,0">
+                    <TextBlock Classes="row-label" Text="{Binding Text.ConsoleBitrate}" />
+                    <ComboBox Name="ConsoleBitrateBox" Classes="row-control" ItemsSource="{Binding ConsoleLink.Bitrates}" SelectedIndex="{Binding ConsoleLink.BitrateIndex, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.ConsoleBitrate}" />
+                  </ui:SettingRow>
+                  <TextBlock Classes="muted" Text="{Binding ConsoleLink.BitrateLabel}" HorizontalAlignment="Right" FlowDirection="LeftToRight" />
+                  <Button Classes="primary" HorizontalAlignment="Center" Content="{Binding Text.ConsoleApply}" Command="{Binding ConsoleLink.ApplyQualityCommand}" IsVisible="{Binding ConsoleLink.QualityChanged}" />
+                </StackPanel>
+              </Border>
+            </ui:CardPair>
+          </StackPanel>
             <ui:CardPair Name="MainCards" Grid.Row="1">
               <Border Name="FrameGenerationCard" Classes="card">
                 <StackPanel Spacing="6">
@@ -225,19 +410,19 @@
                         <ToggleButton Name="XessTensorSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.XessTensor}" IsChecked="{Binding XessTensorEnabled, Mode=TwoWay}" ToolTip.Tip="{Binding Text.XessTensorHelp}" AutomationProperties.Name="{Binding Text.XessTensor}" />
                       </StackPanel>
                     </Border>
-                    <Border Classes="chipbox" Classes.on="{Binding UltraSmoothEnabled}" IsVisible="{Binding IsWindows}">
+                    <Border Classes="chipbox" Classes.on="{Binding UltraSmoothEnabled}">
                       <StackPanel Orientation="Horizontal">
                         <ToggleButton Name="UltraSmoothSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.UltraSmooth}" IsChecked="{Binding UltraSmoothEnabled, Mode=TwoWay}" ToolTip.Tip="{Binding Text.UltraSmoothHelp}" AutomationProperties.Name="{Binding Text.UltraSmooth}" />
                         <Button Name="SmoothWhatIs" Classes="chip-icon" Content="?" AutomationProperties.Name="?" />
                       </StackPanel>
                     </Border>
-                    <Border Classes="chipbox" Classes.on="{Binding EvenPacingEnabled}" IsVisible="{Binding IsWindows}">
+                    <Border Classes="chipbox" Classes.on="{Binding EvenPacingEnabled}">
                       <StackPanel Orientation="Horizontal">
                         <ToggleButton Name="EvenPacingSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.EvenPacing}" IsChecked="{Binding EvenPacingEnabled, Mode=TwoWay}" ToolTip.Tip="{Binding Text.EvenPacingHelp}" AutomationProperties.Name="{Binding Text.EvenPacing}" />
                         <Button Name="PacingWhatIs" Classes="chip-icon" Content="?" AutomationProperties.Name="?" />
                       </StackPanel>
                     </Border>
-                    <Border Classes="chipbox" Classes.on="{Binding LowLatencyEnabled}" IsVisible="{Binding IsWindows}">
+                    <Border Classes="chipbox" Classes.on="{Binding LowLatencyEnabled}">
                       <StackPanel Orientation="Horizontal">
                         <ToggleButton Name="LowLatencySwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.LowLatency}" IsChecked="{Binding LowLatencyEnabled, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.LowLatency}" />
                       </StackPanel>
@@ -298,25 +483,164 @@
                   <ListBox Name="UpscalerTiles" Classes="tiles" ItemsSource="{Binding Upscalers}" SelectedIndex="{Binding UpscalerIndex, Mode=TwoWay}" FlowDirection="LeftToRight" AutomationProperties.Name="{Binding Text.Upscaler}">
                     <ListBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" TextWrapping="Wrap" TextAlignment="Center" /></DataTemplate></ListBox.ItemTemplate>
                   </ListBox>
-                  <StackPanel Orientation="Horizontal" Margin="0,8,0,2" HorizontalAlignment="Center">
-                    <ToggleButton Name="StretchSwitch" Theme="{StaticResource Chip}" Content="{Binding Text.Stretch}" IsChecked="{Binding StretchEnabled, Mode=TwoWay}" Margin="0" AutomationProperties.Name="{Binding Text.Stretch}" />
-                    <Button Name="StretchWhatIs" Classes="whatis" Content="?" Margin="8,0,0,0" AutomationProperties.Name="?" />
-                  </StackPanel>
-                  <ui:SettingRow>
+                  <WrapPanel Orientation="Horizontal" Margin="0,8,0,2" HorizontalAlignment="Center" ItemsAlignment="Center">
+                    <Border Classes="chipbox" Classes.on="{Binding Dlss5DllReady}" IsVisible="{Binding IsDlss5On}">
+                      <StackPanel Orientation="Horizontal">
+                        <Button Name="Dlss5DllQuickButton" Theme="{StaticResource ChipButton}" Command="{Binding PickDlss5DllCommand}" ToolTip.Tip="{Binding Dlss5DllPath}" AutomationProperties.Name="{Binding Text.Dlss5Dll}">
+                          <TextBlock Text="{Binding Dlss5DllLabel}" />
+                        </Button>
+                        <Button Name="Dlss5Gear" Classes="chip-icon" ToolTip.Tip="DLSS 5" AutomationProperties.Name="Dlss5Gear">
+                          <Path Classes="chip-gear" Data="F0 M 9.60,4.16 L 10.00,1.18 L 14.00,1.18 L 14.40,4.16 L 15.85,4.76 L 18.23,2.93 L 21.07,5.77 L 19.24,8.15 L 19.84,9.60 L 22.82,10.00 L 22.82,14.00 L 19.84,14.40 L 19.24,15.85 L 21.07,18.23 L 18.23,21.07 L 15.85,19.24 L 14.40,19.84 L 14.00,22.82 L 10.00,22.82 L 9.60,19.84 L 8.15,19.24 L 5.77,21.07 L 2.93,18.23 L 4.76,15.85 L 4.16,14.40 L 1.18,14.00 L 1.18,10.00 L 4.16,9.60 L 4.76,8.15 L 2.93,5.77 L 5.77,2.93 L 8.15,4.76 Z M 8.60,12.00 A 3.40,3.40 0 1 1 15.40,12.00 A 3.40,3.40 0 1 1 8.60,12.00 Z" />
+                          <Button.Flyout><Flyout Placement="Bottom" FlyoutPresenterClasses="settings">
+                            <ScrollViewer Name="Dlss5FlyoutScroll" MaxHeight="440" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" AllowAutoHide="False">
+                              <StackPanel Width="380" Spacing="4" Margin="0,0,12,0">
+                                <ui:SettingRow>
+                                  <StackPanel Orientation="Vertical" VerticalAlignment="Center">
+                                    <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Dll}" />
+                                    <TextBlock Classes="muted" FontSize="11" Text="{Binding Dlss5DllLabel}" MaxWidth="200" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Dlss5DllPath}" />
+                                  </StackPanel>
+                                  <Button Name="Dlss5DllButton" Classes="row-control" Command="{Binding PickDlss5DllCommand}" AutomationProperties.Name="{Binding Text.Dlss5Dll}">
+                                    <TextBlock Text="{Binding Text.Dlss5Browse}" />
+                                  </Button>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Model}" />
+                                  <ComboBox Classes="row-control" ItemsSource="{Binding Dlss5Models}" SelectedIndex="{Binding Dlss5ModelIndex, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Model}">
+                                    <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                                  </ComboBox>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Style}" />
+                                  <ComboBox Classes="row-control" ItemsSource="{Binding Dlss5Styles}" SelectedIndex="{Binding Dlss5StyleIndex, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Style}">
+                                    <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                                  </ComboBox>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Passes}" />
+                                  <ComboBox Classes="row-control" ItemsSource="{Binding Dlss5PassesChoices}" SelectedIndex="{Binding Dlss5PassesIndex, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Passes}" FlowDirection="LeftToRight">
+                                    <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
+                                  </ComboBox>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Scale}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="25" Maximum="100" Value="{Binding Dlss5Scale, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Scale}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5ScaleLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Intensity}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="300" Value="{Binding Dlss5Intensity, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Intensity}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5IntensityLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Tone}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="200" Value="{Binding Dlss5Tone, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Tone}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5ToneLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Structure}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="200" Value="{Binding Dlss5Structure, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Structure}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5StructureLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Skin}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="-100" Maximum="250" Value="{Binding Dlss5Skin, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Skin}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5SkinLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5KeepColors}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="100" Value="{Binding Dlss5KeepColors, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5KeepColors}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5KeepColorsLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5LowLight}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="100" Value="{Binding Dlss5LowLight, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5LowLight}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5LowLightLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Denoise}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="100" Value="{Binding Dlss5Denoise, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Denoise}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5DenoiseLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Edge}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="100" Value="{Binding Dlss5Edge, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Edge}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5EdgeLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Brightness}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="-100" Maximum="100" Value="{Binding Dlss5Brightness, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Brightness}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5BrightnessLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Contrast}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="-100" Maximum="100" Value="{Binding Dlss5Contrast, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Contrast}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5ContrastLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Saturation}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="-100" Maximum="100" Value="{Binding Dlss5Saturation, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Saturation}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5SaturationLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <ui:SettingRow>
+                                  <TextBlock Classes="row-label" Text="{Binding Text.Dlss5Warmth}" />
+                                  <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
+                                    <Slider Theme="{StaticResource ArmoSlider}" Minimum="-100" Maximum="100" Value="{Binding Dlss5Warmth, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Dlss5Warmth}" />
+                                    <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding Dlss5WarmthLabel}" />
+                                  </Grid>
+                                </ui:SettingRow>
+                                <Button Content="{Binding Text.Reset}" Command="{Binding Dlss5ResetCommand}" HorizontalAlignment="Right" Margin="0,6,0,0" />
+                              </StackPanel>
+                            </ScrollViewer>
+                          </Flyout></Button.Flyout>
+                        </Button>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="chipbox" Classes.on="{Binding StretchEnabled}">
+                      <StackPanel Orientation="Horizontal">
+                        <ToggleButton Name="StretchSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.Stretch}" IsChecked="{Binding StretchEnabled, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.Stretch}" />
+                        <Button Name="StretchWhatIs" Classes="chip-icon" Content="?" AutomationProperties.Name="?" />
+                      </StackPanel>
+                    </Border>
+                  </WrapPanel>
+                  <ui:SettingRow IsVisible="{Binding IsSmsrOn}">
                     <TextBlock Classes="row-label" Text="{Binding Text.SmsrStrength}" />
                     <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
                       <Slider Theme="{StaticResource ArmoSlider}" Minimum="0" Maximum="200" Value="{Binding SmsrStrength, Mode=TwoWay}" IsEnabled="{Binding IsSmsrOn}" AutomationProperties.Name="{Binding Text.SmsrStrength}" />
                       <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding SmsrStrengthLabel}" />
                     </Grid>
                   </ui:SettingRow>
-                  <ui:SettingRow>
+                  <ui:SettingRow IsVisible="{Binding IsSharpnessOpen}">
                     <TextBlock Classes="row-label" Text="{Binding Text.Sharpness}" />
                     <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
                       <Slider Theme="{StaticResource ArmoSlider}" Value="{Binding Sharpness, Mode=TwoWay}" IsEnabled="{Binding IsSharpnessOpen}" AutomationProperties.Name="{Binding Text.Sharpness}" />
                       <TextBlock Grid.Column="1" Classes="percentage" Text="{Binding SharpnessLabel}" />
                     </Grid>
                   </ui:SettingRow>
-                  <ui:SettingRow>
+                  <ui:SettingRow IsVisible="{Binding IsOverSharpnessOpen}">
                     <TextBlock Classes="row-label" Text="{Binding Text.OverSharpness}" />
                     <Grid Classes="row-control" ColumnDefinitions="*,48" FlowDirection="LeftToRight">
                       <Slider Theme="{StaticResource ArmoSlider}" Value="{Binding OverSharpness, Mode=TwoWay}" IsEnabled="{Binding IsOverSharpnessOpen}" AutomationProperties.Name="{Binding Text.OverSharpness}" />
@@ -356,16 +680,16 @@
                 <Button Name="LinuxLogButton" Classes="link" HorizontalAlignment="Left" Content="{Binding Text.LinuxOpenLog}" Command="{Binding OpenLogsCommand}" />
               </StackPanel>
             </Border>
-            <Border Name="QuickCard" Grid.Row="3" Classes="card" Margin="0,12,0,0" IsVisible="{Binding IsWindows}">
+            <Border Name="QuickCard" Grid.Row="3" Classes="card" Margin="0,12,0,0">
               <StackPanel Spacing="6">
                 <TextBlock Classes="heading" Text="{Binding Text.QuickSettings}" Margin="0,0,0,8" />
                 <WrapPanel Name="QuickChips" Orientation="Horizontal" HorizontalAlignment="Center" ItemsAlignment="Center">
-                  <Border Classes="chipbox" Classes.on="{Binding VrrEnabled}" IsVisible="{Binding IsWindows}">
+                  <Border Classes="chipbox" Classes.on="{Binding VrrEnabled}">
                     <StackPanel Orientation="Horizontal">
                       <ToggleButton Name="VrrSwitch" Theme="{StaticResource ChipInner}" Content="VRR" IsChecked="{Binding VrrEnabled, Mode=TwoWay}" AutomationProperties.Name="VRR" />
                     </StackPanel>
                   </Border>
-                  <Border Classes="chipbox" Classes.on="{Binding HdrEnabled}" IsVisible="{Binding IsWindows}">
+                  <Border Classes="chipbox" Classes.on="{Binding HdrEnabled}">
                     <StackPanel Orientation="Horizontal">
                       <ToggleButton Name="HdrSwitch" Theme="{StaticResource ChipInner}" Content="HDR" IsChecked="{Binding HdrEnabled, Mode=TwoWay}" AutomationProperties.Name="HDR" />
                     </StackPanel>
@@ -399,7 +723,7 @@
                       <ToggleButton Name="StillPixelsSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.StillPixels}" IsChecked="{Binding StillPixelsEnabled, Mode=TwoWay}" AutomationProperties.Name="{Binding Text.StillPixels}" />
                     </StackPanel>
                   </Border>
-                  <Border Classes="chipbox" Classes.on="{Binding LimitToScreenEnabled}" IsVisible="{Binding IsWindows}">
+                  <Border Classes="chipbox" Classes.on="{Binding LimitToScreenEnabled}">
                     <StackPanel Orientation="Horizontal">
                       <ToggleButton Name="ScreenLimitSwitch" Theme="{StaticResource ChipInner}" Content="{Binding Text.ScreenLimit}" IsChecked="{Binding LimitToScreenEnabled, Mode=TwoWay}" ToolTip.Tip="{Binding Text.ScreenLimitHelp}" AutomationProperties.Name="{Binding Text.ScreenLimit}" />
                     </StackPanel>
@@ -504,10 +828,11 @@
                           </ComboBox>
                         </ui:SettingRow>
                         <ui:SettingRow>
-                          <TextBlock Classes="row-label" Text="{Binding Text.Countdown}" />
-                          <ComboBox Classes="row-control" ItemsSource="{Binding Countdowns}" SelectedIndex="{Binding CountdownIndex, Mode=TwoWay}" IsEnabled="{Binding !IsMotionActive}" AutomationProperties.Name="{Binding Text.Countdown}">
-                            <ComboBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ComboBox.ItemTemplate>
-                          </ComboBox>
+                          <StackPanel Orientation="Vertical" VerticalAlignment="Center">
+                            <TextBlock Classes="row-label" Text="{Binding Text.Countdown}" ToolTip.Tip="{Binding Text.CountdownHelp}" />
+                            <TextBlock Classes="muted" FontSize="11" Text="{Binding CountdownHint}" ToolTip.Tip="{Binding Text.CountdownHelp}" />
+                          </StackPanel>
+                          <NumericUpDown Name="CountdownBox" Classes="row-control target" Minimum="0" Maximum="120" Increment="1" FormatString="0" ParsingNumberStyle="Integer" ClipValueToMinMax="False" AllowSpin="True" Value="{Binding CountdownSeconds, Mode=TwoWay}" IsEnabled="{Binding !IsMotionActive}" ToolTip.Tip="{Binding Text.CountdownHelp}" AutomationProperties.Name="{Binding Text.Countdown}" FlowDirection="LeftToRight" />
                         </ui:SettingRow>
                         <ui:SettingRow>
                           <TextBlock Classes="row-label" Text="{Binding Text.SpoutOutput}" />

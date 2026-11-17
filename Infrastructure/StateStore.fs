@@ -71,6 +71,11 @@ type StateStore(path: string) =
     member _.SaveError = lock gate (fun () -> saveError)
     member _.StatusChanged = statusChanged.Publish
     member _.Flush() = writePending ()
+    member _.Cancel() =
+        lock gate (fun () ->
+            disposed <- true
+            pending <- None
+            timer.Change(Timeout.Infinite, Timeout.Infinite) |> ignore)
 
     interface IDisposable with
         member _.Dispose() =

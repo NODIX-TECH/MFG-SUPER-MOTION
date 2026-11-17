@@ -258,3 +258,9 @@ C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\layer\ai\LICENSE-ncnn.txt
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\layer\ai\LICENSE-RIFE.txt
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\layer\ai\smfg_ai.ncnn.bin
 C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\layer\ai\smfg_ai.ncnn.param
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\mfgsm-console.exe
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\avcodec-62.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\avutil-60.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\swresample-6.dll
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\licenses\chiaki-ng-COPYING.txt
+C:\dev\ARMO\ARMO\ARMO\bin\Release\net8.0\linux-x64\Console\licenses\FFmpeg-LICENSE.txt

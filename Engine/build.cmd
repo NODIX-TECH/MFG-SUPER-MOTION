@@ -10,11 +10,20 @@ cd /d "%~dp0"
 set "OUT=%~1"
 if "%OUT%"=="" set "OUT=work\build"
 if /i "%OUT%"=="out" if exist out\nvngx.dll (echo build.cmd: not over the engine in out\ - build elsewhere, then install-engine.ps1 & exit /b 2)
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+set "VCVARS="
+for %%Y in (2022 18 2026) do (
+    for %%E in (Community Professional Enterprise BuildTools) do (
+        if not defined VCVARS if exist "C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+            set "VCVARS=C:\Program Files\Microsoft Visual Studio\%%Y\%%E\VC\Auxiliary\Build\vcvars64.bat"
+        )
+    )
+)
+if not defined VCVARS (echo build.cmd: Visual Studio vcvars64.bat not found & exit /b 1)
+call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist obj mkdir obj
-cl /nologo /O2 /EHsc /W3 /MD /utf-8 /std:c++17 /Iinclude /Iinclude\ort sm_engine.cpp /Foobj\ /Fe:"%OUT%\nvngx.dll" /link lib\nvsdk_ngx_d.lib version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib WindowsApp.lib dwmapi.lib setupapi.lib
+cl /nologo /O2 /EHsc /W3 /MD /utf-8 /std:c++17 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS /Iinclude /Iinclude\ort sm_engine.cpp /Foobj\ /Fe:"%OUT%\nvngx.dll" /link lib\nvsdk_ngx_d.lib version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib WindowsApp.lib dwmapi.lib setupapi.lib
 if errorlevel 1 exit /b 1
 del /q "%OUT%\nvngx.exp" "%OUT%\nvngx.lib" 2>nul
 xcopy /y /q /d runtime\*.dll "%OUT%\" >nul

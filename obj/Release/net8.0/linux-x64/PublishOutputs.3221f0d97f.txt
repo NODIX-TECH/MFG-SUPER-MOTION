@@ -6,6 +6,12 @@ C:\dev\ARMO\ARMO\Linux\publish-linux\layer\ai\LICENSE-ncnn.txt
 C:\dev\ARMO\ARMO\Linux\publish-linux\layer\ai\LICENSE-RIFE.txt
 C:\dev\ARMO\ARMO\Linux\publish-linux\layer\ai\smfg_ai.ncnn.bin
 C:\dev\ARMO\ARMO\Linux\publish-linux\layer\ai\smfg_ai.ncnn.param
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\mfgsm-console.exe
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\avcodec-62.dll
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\avutil-60.dll
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\swresample-6.dll
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\licenses\chiaki-ng-COPYING.txt
+C:\dev\ARMO\ARMO\Linux\publish-linux\Console\licenses\FFmpeg-LICENSE.txt
 C:\dev\ARMO\ARMO\Linux\publish-linux\ModKit\examples\FpsGraph\FpsGraph.cs
 C:\dev\ARMO\ARMO\Linux\publish-linux\ModKit\examples\FpsGraph\FpsGraph.csproj
 C:\dev\ARMO\ARMO\Linux\publish-linux\ModKit\examples\FpsGraph\mod.json

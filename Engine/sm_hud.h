@@ -22,7 +22,7 @@
 
 namespace smhud
 {
-    static constexpr UINT kTables = 64;     // descriptor tables in turn, each side (passes in flight)
+    static constexpr UINT kTables = 1024;   // descriptor tables in turn, each side (passes in flight; round 105: 64 wrapped around in a few pairs at high multipliers with frames drawn ahead, causing random black squares)
     static constexpr UINT kSlotsEach = 5;   // a table: 4 read, 1 written
 
     static const char kHlsl[] = R"(

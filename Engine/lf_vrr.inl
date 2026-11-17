@@ -512,6 +512,6 @@ static HRESULT ShowPresentNow(double source)
     if (SUCCEEDED(hr)) VrrObserve();
     if (SUCCEEDED(hr)) LatencyPresented(source < 0.0 ? lfCap.stamp : source);
     if (SUCCEEDED(hr)) CounterPresented(source, source < 0.0);
-    front::Tell();
+    if (source != 0.0) front::Tell();
     return hr;
 }

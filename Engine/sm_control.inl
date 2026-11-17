@@ -53,6 +53,7 @@ enum : unsigned
     kRedoPipeline = 2,   // the motion field's size or its source changed
     kRedoFg       = 4,   // the generator's feature is made again
     kRedoWindow   = 8,   // the output window is rebuilt (it notices by itself)
+    kRedoDlss5    = 16,  // DLSS 5 turned on/off or its sliders/model changed
 };
 
 static bool KeyIs(const char *key, const char *name) { return _stricmp(key, name) == 0; }
@@ -192,14 +193,43 @@ static unsigned ApplyOption(const char *key, const char *value)
     if (KeyIs(key, "counter_size")) { set(smOpt.counter_size, 50, 200); return 0; }   // (round 85, GitHub 71)
     if (KeyIs(key, "spout"))        { if (set(smOpt.spout, 0, 1) && number) Trace("[option] Spout output on"); return 0; }
     if (KeyIs(key, "link"))         { set(smOpt.link, 0, 1); return 0; }
+    if (KeyIs(key, "dlss5_dll"))
+    {
+        Dlss5SetDll(value);
+        if (value && *value) Trace("[option] DLSS 5 DLL: %s", value);
+        return Dlss5Wanted() ? kRedoDlss5 : 0;
+    }
     if (KeyIs(key, "upscaler"))
     {
-        static const char *const names[] = { "off", "sharpening only", "integer", "nearest neighbour", "Anime4K", "SMSR 1.0" };
-        const bool was = smOpt.upscaler.load() == 5;
-        if (set(smOpt.upscaler, 0, 5)) Trace("[option] upscaler: %s", names[smOpt.upscaler.load()]);
+        static const char *const names[] = { "off", "sharpening only", "integer", "nearest neighbour", "Anime4K", "SMSR 1.0", "FSR 1.0", "DLSS 5" };
+        const int prev = smOpt.upscaler.load();
+        const bool was = prev == 5;
+        if (set(smOpt.upscaler, 0, 7)) Trace("[option] upscaler: %s", names[smOpt.upscaler.load()]);
+        unsigned redo = 0;
         // (Round 88l: SMSR enlarges the picture as it is taken - to or from it, the picture's size changes.)
-        return was != (smOpt.upscaler.load() == 5) ? kRedoPipeline : 0;
+        if (was != (smOpt.upscaler.load() == 5)) redo |= kRedoPipeline;
+        if ((prev == 7) != (smOpt.upscaler.load() == 7)) redo |= kRedoDlss5;
+        return redo;
     }
+    auto dlss5_set = [&](std::atomic<int> &field, int lo, int hi) -> unsigned {
+        return (set(field, lo, hi) && Dlss5Wanted()) ? kRedoDlss5 : 0u;
+    };
+    if (KeyIs(key, "dlss5_model"))       return dlss5_set(smOpt.dlss5_model, 0, 1);
+    if (KeyIs(key, "dlss5_style"))       return dlss5_set(smOpt.dlss5_style, 0, 2);
+    if (KeyIs(key, "dlss5_scale"))       return dlss5_set(smOpt.dlss5_scale, 25, 100);
+    if (KeyIs(key, "dlss5_passes"))      return dlss5_set(smOpt.dlss5_passes, 1, 6);
+    if (KeyIs(key, "dlss5_intensity"))   return dlss5_set(smOpt.dlss5_intensity, 0, 300);
+    if (KeyIs(key, "dlss5_tone"))        return dlss5_set(smOpt.dlss5_tone, 0, 200);
+    if (KeyIs(key, "dlss5_structure"))   return dlss5_set(smOpt.dlss5_structure, 0, 200);
+    if (KeyIs(key, "dlss5_skin"))        return dlss5_set(smOpt.dlss5_skin, -100, 250);
+    if (KeyIs(key, "dlss5_denoise"))     return dlss5_set(smOpt.dlss5_denoise, 0, 100);
+    if (KeyIs(key, "dlss5_edge"))        return dlss5_set(smOpt.dlss5_edge, 0, 100);
+    if (KeyIs(key, "dlss5_keep_colors")) return dlss5_set(smOpt.dlss5_keep_colors, 0, 100);
+    if (KeyIs(key, "dlss5_low_light"))   return dlss5_set(smOpt.dlss5_low_light, 0, 100);
+    if (KeyIs(key, "dlss5_bright"))      return dlss5_set(smOpt.dlss5_bright, -100, 100);
+    if (KeyIs(key, "dlss5_contrast"))    return dlss5_set(smOpt.dlss5_contrast, -100, 100);
+    if (KeyIs(key, "dlss5_sat"))         return dlss5_set(smOpt.dlss5_sat, -100, 100);
+    if (KeyIs(key, "dlss5_warm"))        return dlss5_set(smOpt.dlss5_warm, -100, 100);
     if (KeyIs(key, "sharpness"))      { set(smOpt.sharpness, 0, 100); return 0; }
     if (KeyIs(key, "smsr_strength"))  { if (set(smOpt.smsr_strength, 0, 200)) Trace("[option] SMSR strength %d%%", smOpt.smsr_strength.load()); return 0; }
     if (KeyIs(key, "over_sharpness")) { set(smOpt.over_sharpness, 0, 100); return 0; }
@@ -215,7 +245,7 @@ static unsigned ApplyOption(const char *key, const char *value)
     if (KeyIs(key, "source"))       { set(smOpt.source, 0, 1); return 0; }
     if (KeyIs(key, "window_mode"))  { set(smOpt.window_mode, 0, 2); return 0; }
     if (KeyIs(key, "monitor"))      { set(smOpt.monitor, 0, 16); return 0; }
-    if (KeyIs(key, "delay"))        { set(smOpt.delay, 0, 30); return 0; }
+    if (KeyIs(key, "delay"))        { set(smOpt.delay, 0, 120); return 0; }
     if (KeyIs(key, "gpu"))          { set(smOpt.gpu, -1, 63); return 0; }
     if (KeyIs(key, "hwnd"))         { smOpt.hwnd = static_cast<unsigned long long>(number); return 0; }
     if (KeyIs(key, "owner"))        { smOpt.owner = static_cast<unsigned long>(number); return 0; }
@@ -234,7 +264,7 @@ static unsigned ApplyLine(std::string line)
         return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
     };
     const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
-    if (key.empty() || value.empty()) return 0;
+    if (key.empty() || (value.empty() && !KeyIs(key.c_str(), "dlss5_dll"))) return 0;
     return ApplyOption(key.c_str(), value.c_str());
 }
 
@@ -242,7 +272,7 @@ static bool ReadStartFile(const wchar_t *path)
 {
     FILE *file = _wfsopen(path, L"r", _SH_DENYNO);
     if (!file) return false;
-    char line[512];
+    char line[1024];
     while (fgets(line, sizeof(line), file)) ApplyLine(line);
     fclose(file);
     return true;
@@ -261,7 +291,7 @@ static struct ControlState
 
 static DWORD WINAPI ControlThread(LPVOID)
 {
-    char line[512];
+    char line[1024];
     while (fgets(line, sizeof(line), stdin))
     {
         std::string text(line);

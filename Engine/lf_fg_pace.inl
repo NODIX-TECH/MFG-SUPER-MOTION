@@ -89,9 +89,9 @@ struct FgPace
         // every one. SM_SMOOTH_BUFFER=<percent of a frame> (100).
         if (SmoothOn())
         {
-            static const double share = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_SMOOTH_BUFFER", v, sizeof(v)) > 0 ? std::clamp(atoi(v), 10, 300) / 100.0 : 1.0; }();
+            static const double share = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_SMOOTH_BUFFER", v, sizeof(v)) > 0 ? std::clamp(atoi(v), 10, 300) / 100.0 : 0.5; }();
             const double frame = usual > 0.0 ? usual : 4.0 * step;
-            return sorted[count / 2] + std::clamp(share * frame, 0.008, 0.050);
+            return sorted[count / 2] + std::clamp(share * frame, 0.006, 0.025);
         }
         const unsigned queue = FgQueueTarget();
         if (queue == 0) return sorted[count / 2];
@@ -108,7 +108,8 @@ struct FgPace
         needs[next] = need;
         next = (next + 1) % kNeeds;
         count = std::min(count + 1, kNeeds);
-        if (delay <= 0.0) { delay = need + 0.25 * step; return false; }
+        const double floor = std::max(lead[1] + call, 0.001);
+        if (delay <= 0.0) { delay = std::max(need + 0.25 * step, floor); return false; }
         // The very first pair after a start or a pause is not like the ones
         // that follow it - the generator and the capture are still warming
         // up - and the delay it set was kept: it only comes down a twentieth
@@ -133,7 +134,7 @@ struct FgPace
             for (unsigned i = 1; i < count; ++i) needs[i - 1] = needs[i];
             --count;
             next = count % kNeeds;
-            delay = Wanted(step);
+            delay = std::max(Wanted(step), floor);
             return need > delay;
         }
         // One late pair does not move the delay by itself (its frames are
@@ -161,6 +162,7 @@ struct FgPace
             // comes back over a second, a pace two or three hundredths faster, not a twelfth.)
             delay -= std::min(above, std::max(0.00005, above > 0.004 ? above / (SmoothOn() ? 30.0 : 12.0) : 0.0));
         }
+        if (delay < floor) delay = floor;
         return came_late;
     }
 

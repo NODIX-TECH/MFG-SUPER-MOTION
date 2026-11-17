@@ -1,10 +1,12 @@
 // Small resampler owned by DLSS FG. Real frames never pass through it.
-// Separate producer/presenter descriptor pairs prevent concurrent rewrites.
+// Separate producer/presenter descriptor rings prevent concurrent rewrites.
 static struct FgScaleState {
+    static constexpr UINT kSets = 64;
     winrt::com_ptr<ID3D12RootSignature> root;
     winrt::com_ptr<ID3D12PipelineState> pso;
     winrt::com_ptr<ID3D12DescriptorHeap> heap;
     winrt::com_ptr<ID3D12Resource> display;
+    UINT ring[2] = {};
 } g_fg_scale;
 
 static bool FgScaleReady(UINT w, UINT h, DXGI_FORMAT format)
@@ -75,7 +77,7 @@ cbuffer C : register(b0) { uint outW; uint outH; };
         pso.pRootSignature=g_fg_scale.root.get(); pso.CS={code->GetBufferPointer(),code->GetBufferSize()};
         if (FAILED(lfCore.device->CreateComputePipelineState(&pso,IID_PPV_ARGS(g_fg_scale.pso.put())))) return false;
         D3D12_DESCRIPTOR_HEAP_DESC heap = {};
-        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=4;
+        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=2 * FgScaleState::kSets * 2;
         heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(lfCore.device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(g_fg_scale.heap.put())))) return false;
     }
@@ -90,7 +92,9 @@ static void FgScaleRecord(ID3D12GraphicsCommandList *list, ID3D12Resource *sourc
     const UINT stride=lfCore.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     auto cpu=g_fg_scale.heap->GetCPUDescriptorHandleForHeapStart();
     auto gpu=g_fg_scale.heap->GetGPUDescriptorHandleForHeapStart();
-    cpu.ptr+=(presenter?2:0)*stride; gpu.ptr+=(presenter?2:0)*stride;
+    const UINT side = presenter ? 1u : 0u;
+    const UINT slot = (side * FgScaleState::kSets + (g_fg_scale.ring[side]++ % FgScaleState::kSets)) * 2u;
+    cpu.ptr+=SIZE_T(slot)*stride; gpu.ptr+=UINT64(slot)*stride;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
     srv.Format=sd.Format; srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels=1;

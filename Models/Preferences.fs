@@ -9,7 +9,7 @@ type DisplayOptions =
       Mode: int
       MultiplierCustom: int  // round 85, GitHub 73: "Custom" - any multiplier typed, in tenths (21 = x2.1, 11 .. 60); 0: Mode's whole one
       Flow: int              // used when GameType is "custom"; the other kinds of game bring their own
-      Upscaler: int          // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K, 5 SMSR 1.0 (the engine's own numbers)
+      Upscaler: int          // 0 off, 1 sharpening only, 2 integer, 3 nearest neighbour, 4 Anime4K, 5 SMSR 1.0, 6 FSR 1.0, 7 DLSS 5 (the engine's own numbers)
       Sharpness: int         // 0..100, used unless Upscaler is off
       OverSharpness: int     // 0..100, on top of it
       // Advanced. Schema says which of these a saved profile already holds:
@@ -17,7 +17,7 @@ type DisplayOptions =
       Schema: int
       CaptureApi: int        // 0 DXGI, 1 WGC
       WindowMode: int        // 0 borderless, 1 scaled, 2 windowed
-      Countdown: int         // index into Preferences.countdowns
+      Countdown: int         // seconds before picking (0..120; 0 = click target window directly)
       QueueTarget: int       // 0, 1, 2
       FrameLimit: int        // frames a second shown, 0 off
       GameFps: int           // the game's frame rate as the person gives it (20..500); 0 the engine reads it from the frames
@@ -79,6 +79,24 @@ type DisplayOptions =
       FpsCounterSize: int
       // Round 88o: SMSR's strength, percent from 100 (a file without it: 0 - as trained); -100..100 = 0..200%.
       SmsrBoost: int
+      // DLSS 5 (DLSSNR via user-selected nvngx_dlssnr.dll): neural rendering options.
+      Dlss5Dll: string
+      Dlss5Model: int
+      Dlss5Style: int
+      Dlss5Scale: int
+      Dlss5Passes: int
+      Dlss5Intensity: int
+      Dlss5Tone: int
+      Dlss5Structure: int
+      Dlss5Skin: int
+      Dlss5Denoise: int
+      Dlss5Edge: int
+      Dlss5KeepColors: int
+      Dlss5LowLight: int
+      Dlss5Brightness: int
+      Dlss5Contrast: int
+      Dlss5Saturation: int
+      Dlss5Warmth: int
       GameType: int }        // index into Preferences.gameFlows; the last one is "custom"
 
 [<CLIMutable>]
@@ -88,6 +106,29 @@ type Profile =
       Options: DisplayOptions }
 
 [<CLIMutable>]
+/// A PlayStation this PC was linked with (Remote Play's registration): what a session with it needs.
+type LinkedConsole =
+    { HostId: string
+      Name: string
+      Address: string
+      Ps5: bool
+      RegistKey: string    // 32 hex digits
+      Morning: string }    // base64, 16 bytes
+
+/// Console Link (2026-11-16, the owner): a console's picture streamed here - how it is asked for, and what is done
+/// to it on this PC. Kept for the app, not a profile.
+type ConsoleOptions =
+    { Platform: int        // 0 PlayStation, 1 Xbox
+      Resolution: int      // 0 720p, 1 1080p, 2 1440p, 3 2160p (above 1080p: PS5 only)
+      Fps: int             // 0 30, 1 60
+      Bitrate: int         // 0 by the resolution, else kilobits a second
+      Codec: int           // 0 H.264, 1 H.265, 2 H.265 HDR (PS5)
+      Multiplier: int      // frame generation on the console's picture: 0 off, 1 x2, 2 x3, 3 x4
+      Address: string      // a console's address typed by hand (where a search does not reach)
+      AccountId: string    // the PSN account id (base64, 8 bytes) a PS5's link needs
+      Passcode: string     // the console's own login passcode, when one is set (4 digits)
+      Linked: LinkedConsole array }
+
 type Preferences =
     { Version: int
       Language: int
@@ -102,15 +143,28 @@ type Preferences =
       // (Windows' RegisterHotKey values); 0 the default, -1 none.
       Hotkey: int
       SelectedProfile: string
-      Profiles: Profile array }
+      Profiles: Profile array
+      Console: ConsoleOptions }
 
 module Preferences =
-    let schema = 24
+    /// Console Link's start: 1080p at 60, the bitrate by the resolution, H.265 (less to send for the same picture), x2.
+    let consoleDefaults = { Platform = 0; Resolution = 1; Fps = 1; Bitrate = 0; Codec = 1; Multiplier = 1; Address = ""; AccountId = ""; Passcode = ""; Linked = [||] }
+    let normalizeConsole (c: ConsoleOptions) =
+        let text (s: string) = if isNull s then "" else s.Trim()
+        if isNull (box c) then consoleDefaults
+        else { c with Platform = Math.Clamp(c.Platform, 0, 1); Resolution = Math.Clamp(c.Resolution, 0, 3); Fps = Math.Clamp(c.Fps, 0, 1)
+                      Bitrate = (if c.Bitrate <= 0 then 0 else Math.Clamp(c.Bitrate, 2000, 100000)); Codec = Math.Clamp(c.Codec, 0, 2)
+                      Multiplier = Math.Clamp(c.Multiplier, 0, 3); Address = text c.Address; AccountId = text c.AccountId
+                      Passcode = (let p = text c.Passcode in if p.Length = 4 && p |> Seq.forall Char.IsDigit then p else "")
+                      Linked = (if isNull c.Linked then [||] else c.Linked |> Array.filter (fun l -> not (isNull (box l)) && not (String.IsNullOrEmpty l.RegistKey)) |> Array.truncate 8) }
+    /// The bitrate asked for when it is "by the resolution", kilobits a second (what Remote Play's own clients use).
+    let consoleBitrate (c: ConsoleOptions) =
+        if c.Bitrate > 0 then c.Bitrate else match c.Resolution with 0 -> 10000 | 1 -> 15000 | 2 -> 30000 | _ -> 40000
+    let schema = 27
     // The sync modes the engine has (see SyncMode).
     let syncModes = 5
-    // The upscalers the engine has: off, sharpening only, integer, nearest neighbour, Anime4K, and (round 88k) SMSR 1.0 -
-    // our own network, twice the size (Engine\lf_smsr.inl).
-    let upscalers = 6
+    // The upscalers the engine has: off, sharpening only, integer, nearest neighbour, Anime4K, SMSR 1.0, FSR 1.0, and DLSS 5.
+    let upscalers = 8
     // Round 99, the Triangle Mesh's settings (the engine's tri_pitch, tri_rounds, tri_fine, tri_full, tri_home, tri_top): what
     // each list offers, and which place is the engine's own. A setting is kept as its place + 1 (0: the default).
     let triPitches = [| 8; 12; 16; 24; 32 |]
@@ -128,6 +182,7 @@ module Preferences =
     // path with msm_ai 1).
     let generators = 4
     let countdowns = [| 3; 5; 10 |]
+    let countdownMax = 120
     // The size frames in between are made at for each kind of game, percent of
     // the picture: auto, 2D, 2.5D, first person, third person, racing, open
     // world (the engine's own table, Engine/sm_options.h, kGameKinds - the same
@@ -144,18 +199,20 @@ module Preferences =
 
     let defaultOptions =
         { FrameGeneration = true; Generator = 0; Mode = 2; MultiplierCustom = 0; Flow = 35; Upscaler = 0; Sharpness = 50; OverSharpness = 0
-          Schema = schema; CaptureApi = 1; WindowMode = 0; Countdown = 1
+          Schema = schema; CaptureApi = 1; WindowMode = 0; Countdown = 5
           QueueTarget = 1; FrameLimit = 0; GameFps = 0; Adaptive = false; AdaptiveFps = 0; MultiDisplay = false; CropLeft = 0; CropTop = 0; CropRight = 0; CropBottom = 0
           CursorClip = false; CursorSpeed = false; CursorHide = false; CursorScale = false; LimitToScreen = false; Vrr = false; SyncMode = 1; LowLatency = true; Hdr = false
           GpuPriority = 0; Gpu = ""; MotionSource = 0; XessMotionSource = 0; MsmSearch = 1; XessTensor = false; HudAi = false; Bloom = 0; BloomWide = 0; MsmTensor = false; MsmAi = false; AdaptiveLearning = false; AdaptiveFlow = true; AmlGuideOff = false; VrrChosen = false; DlssPreset = 2
-          Spout = false; StillPixels = true; UltraSmooth = false; TriangleMesh = false; SmtAssist = false; TriPitch = 0; TriRounds = 0; TriFine = 0; TriFull = 0; TriHome = 0; TriRange = 0; TriExact = 0; TriRelax = 0; PairPacing = false; MotionGuard = false; FpsCounter = false; Stretch = false; LockRefresh = false; FpsCounterAdvanced = false; FpsCounterSize = 100; SmsrBoost = 0; GameType = 0 }
+          Spout = false; StillPixels = true; UltraSmooth = false; TriangleMesh = false; SmtAssist = false; TriPitch = 0; TriRounds = 0; TriFine = 0; TriFull = 0; TriHome = 0; TriRange = 0; TriExact = 0; TriRelax = 0; PairPacing = false; MotionGuard = false; FpsCounter = false; Stretch = false; LockRefresh = false; FpsCounterAdvanced = false; FpsCounterSize = 100; SmsrBoost = 0
+          Dlss5Dll = ""; Dlss5Model = 0; Dlss5Style = 0; Dlss5Scale = 100; Dlss5Passes = 1; Dlss5Intensity = 100; Dlss5Tone = 100; Dlss5Structure = 100; Dlss5Skin = 0; Dlss5Denoise = 5; Dlss5Edge = 0; Dlss5KeepColors = 0; Dlss5LowLight = 0; Dlss5Brightness = 0; Dlss5Contrast = 0; Dlss5Saturation = 0; Dlss5Warmth = 0
+          GameType = 0 }
 
     let defaultProfile = { Id = "default"; Name = "Default"; Options = defaultOptions }
 
     let defaults =
         { Version = 1; Language = 0; Theme = 2; Transparency = false; AdvancedOpen = false
           StartWithWindows = false; StartMinimized = false; MinimizeToTray = false; EngineLog = false; Hotkey = 0
-          SelectedProfile = defaultProfile.Id; Profiles = [| defaultProfile |] }
+          SelectedProfile = defaultProfile.Id; Profiles = [| defaultProfile |]; Console = consoleDefaults }
 
     /// The size frames in between are made at, percent of the picture - the same for DLSS MFG and XeSS MFG.
     let effectiveFlow (options: DisplayOptions) =
@@ -225,6 +282,36 @@ module Preferences =
             // Before schema 24 Super Smooth started on (1.1.0): off now - the owner's word (2026-11-13). Once: on again only
             // where the person turns it on, and kept so.
             let options = if options.Schema < 24 then { options with UltraSmooth = false } else options
+            // Before schema 25 DLSS 5 started at 75% scale with KeepColors=100%: unlike frame generation, DLSS 5
+            // processes full native pixels cleanly at 100%, and KeepColors starts at 0% (matching ScreenNative).
+            let options =
+                if options.Schema < 25 then
+                    { options with
+                        Dlss5Scale = (if options.Dlss5Scale = 75 || options.Dlss5Scale <= 0 then 100 else options.Dlss5Scale)
+                        Dlss5KeepColors = (if options.Dlss5KeepColors = 100 then 0 else options.Dlss5KeepColors) }
+                else options
+            // Before schema 26 Countdown was an index (0: 3s, 1: 5s, 2: 10s): migrate it to actual seconds (0..120).
+            let options =
+                if options.Schema >= 2 && options.Schema < 26 then
+                    let secs =
+                        if options.Countdown >= 0 && options.Countdown < countdowns.Length then countdowns[options.Countdown]
+                        else 5
+                    { options with Countdown = secs }
+                else options
+            // Before schema 27, profiles upgraded across schema 24->25 without DLSS 5 strength defaults could hold
+            // 0% Intensity/Tone/Structure (producing zero change on every frame). When all DLSS 5 strength and color
+            // controls are zero, restore the normal defaults so DLSS 5 renders visibly.
+            let options =
+                if options.Schema < 27
+                   && options.Dlss5Intensity = 0 && options.Dlss5Tone = 0 && options.Dlss5Structure = 0
+                   && options.Dlss5Skin = 0 && options.Dlss5LowLight = 0 && options.Dlss5Edge = 0
+                   && options.Dlss5Brightness = 0 && options.Dlss5Contrast = 0 && options.Dlss5Saturation = 0 && options.Dlss5Warmth = 0 then
+                    { options with
+                        Dlss5Intensity = defaultOptions.Dlss5Intensity
+                        Dlss5Tone = defaultOptions.Dlss5Tone
+                        Dlss5Structure = defaultOptions.Dlss5Structure
+                        Dlss5Denoise = (if options.Dlss5Denoise = 0 then defaultOptions.Dlss5Denoise else options.Dlss5Denoise) }
+                else options
             let options =
                 if options.Schema >= schema then options
                 elif options.Schema >= 8 then options
@@ -261,7 +348,7 @@ module Preferences =
                            Schema = schema
                            CaptureApi = Math.Clamp(options.CaptureApi, 0, 1)
                            WindowMode = Math.Clamp(options.WindowMode, 0, 2)
-                           Countdown = Math.Clamp(options.Countdown, 0, countdowns.Length - 1)
+                           Countdown = Math.Clamp(options.Countdown, 0, countdownMax)
                            QueueTarget = Math.Clamp(options.QueueTarget, 0, 2)
                            FrameLimit = normalizeFrameLimit options.FrameLimit
                            GameFps = (if options.GameFps >= 20 && options.GameFps <= 500 then options.GameFps else 0)
@@ -285,6 +372,23 @@ module Preferences =
                            DlssPreset = Math.Clamp(options.DlssPreset, 0, 3)
                            FpsCounterSize = (if options.FpsCounterSize >= 50 && options.FpsCounterSize <= 200 then options.FpsCounterSize else 100)
                            SmsrBoost = Math.Clamp(options.SmsrBoost, -100, 100)
+                           Dlss5Dll = (if isNull options.Dlss5Dll then "" else options.Dlss5Dll.Trim())
+                           Dlss5Model = Math.Clamp(options.Dlss5Model, 0, 1)
+                           Dlss5Style = Math.Clamp(options.Dlss5Style, 0, 2)
+                           Dlss5Scale = (if options.Dlss5Scale <= 0 then 100 else Math.Clamp(options.Dlss5Scale, 25, 100))
+                           Dlss5Passes = (if options.Dlss5Passes <= 0 then 1 else Math.Clamp(options.Dlss5Passes, 1, 6))
+                           Dlss5Intensity = Math.Clamp(options.Dlss5Intensity, 0, 300)
+                           Dlss5Tone = Math.Clamp(options.Dlss5Tone, 0, 200)
+                           Dlss5Structure = Math.Clamp(options.Dlss5Structure, 0, 200)
+                           Dlss5Skin = Math.Clamp(options.Dlss5Skin, -100, 250)
+                           Dlss5Denoise = Math.Clamp(options.Dlss5Denoise, 0, 100)
+                           Dlss5Edge = Math.Clamp(options.Dlss5Edge, 0, 100)
+                           Dlss5KeepColors = Math.Clamp(options.Dlss5KeepColors, 0, 100)
+                           Dlss5LowLight = Math.Clamp(options.Dlss5LowLight, 0, 100)
+                           Dlss5Brightness = Math.Clamp(options.Dlss5Brightness, -100, 100)
+                           Dlss5Contrast = Math.Clamp(options.Dlss5Contrast, -100, 100)
+                           Dlss5Saturation = Math.Clamp(options.Dlss5Saturation, -100, 100)
+                           Dlss5Warmth = Math.Clamp(options.Dlss5Warmth, -100, 100)
                            GameType = Math.Clamp(options.GameType, 0, gameCustom) }
 
     let normalize state =
@@ -301,6 +405,7 @@ module Preferences =
                 else Array.append [| defaultProfile |] (profiles |> Array.truncate 99)
             { state with Language = Math.Clamp(state.Language, 0, ARMO.Localization.Languages.count - 1)
                          Theme = Math.Clamp(state.Theme, 0, 2)
+                         Console = normalizeConsole state.Console
                          Profiles = profiles
                          SelectedProfile =
                             if profiles |> Array.exists (fun p -> p.Id = state.SelectedProfile) then state.SelectedProfile

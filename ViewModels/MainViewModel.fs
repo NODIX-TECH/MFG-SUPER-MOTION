@@ -85,6 +85,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let mutable startMinimized = initial.StartMinimized
     let mutable engineLog = initial.EngineLog
     let mutable minimizeToTray = initial.MinimizeToTray
+    let mutable consoleOptions = Preferences.normalizeConsole initial.Console      // (Console Link's, the app's own)
     let mutable startupError = false
     let mutable hotkeyValue = initial.Hotkey
     let mutable capturingHotkey = false
@@ -114,9 +115,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         [| ChoiceItem(text.Light); ChoiceItem(text.Dark); ChoiceItem(text.System) |]
     let upscalers = Array.init Preferences.upscalers (fun _ -> ChoiceItem(""))
     // Round 88o/88p: the list's places -> the engine's kinds of upscaler (Off first, SMSR 1.0 under it - the owner's word).
-    let upscalerOrder = [| 0; 5; 1; 2; 3; 4 |]
+    let upscalerOrder = [| 0; 5; 7; 6; 1; 2; 3; 4 |]
+    let dlss5Models = [| ChoiceItem(""); ChoiceItem("") |]
+    let dlss5Styles = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
+    let dlss5PassesChoices = [| ChoiceItem("1×"); ChoiceItem("2×"); ChoiceItem("3×"); ChoiceItem("4×"); ChoiceItem("5×"); ChoiceItem("6×") |]
     let windowModes = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
-    let countdowns = Preferences.countdowns |> Array.map (fun _ -> ChoiceItem(""))
     let gpuPriorities = [| ChoiceItem(""); ChoiceItem("") |]
 
     // The engine's sync modes, by their numbers: off, default, VSync on every, every second, every third refresh.
@@ -141,15 +144,17 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let dlssPresets = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     // Performance (preset C) picked: the page shows why it is not advised.
     let presetCPicked = Event<unit>()
-    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.3"; "SMAI 1.0" |]
+    let dlss5DllPickRequested = Event<unit>()
+    let generatorNames = [| "DLSS MFG"; "XeSS MFG"; "SMFG 1.4"; "SMAI 1.0" |]
     let gameTypes = [| ChoiceItem(""); ChoiceItem("2D"); ChoiceItem("2.5D"); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     let labelChoices () =
         let text = text ()
         // (Round 88o: in the list's order - Off, then SMSR 1.0 (88p); the engine's own numbers in upscalerOrder.)
-        let named = [| text.Off; text.SharpnessOnly; "Integer"; "Nearest Neighbor"; "Anime4K"; "SMSR 1.0" |]
+        let named = [| text.Off; text.SharpnessOnly; "Integer"; "Nearest Neighbor"; "Anime4K"; "SMSR 1.0"; "FSR 1.0"; "DLSS 5" |]
         upscalerOrder |> Array.iteri (fun i kind -> upscalers[i].Label <- named[kind])
+        dlss5Models[0].Label <- sprintf "%s (A)" text.PresetQuality; dlss5Models[1].Label <- sprintf "%s (B)" text.Fast
+        dlss5Styles[0].Label <- text.Default; dlss5Styles[1].Label <- text.Dlss5StyleNatural; dlss5Styles[2].Label <- text.Dlss5StyleCinematic
         windowModes[0].Label <- text.Borderless; windowModes[1].Label <- text.Scaled; windowModes[2].Label <- text.Windowed
-        countdowns |> Array.iteri (fun i item -> item.Label <- String.Format(text.Seconds, Preferences.countdowns[i]))
         gpuPriorities[0].Label <- text.Realtime; gpuPriorities[1].Label <- text.Normal
 
         syncModes[0].Label <- text.SyncOff; syncModes[1].Label <- text.Default
@@ -238,8 +243,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         if not lists.IsEmpty then post (fun () -> if not disposed then notify [ "GeneratorIndex"; "GpuIndex"; "GpuName" ])
     let notifyOptions () =
         notifyLists ()
-        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "IsSmai"; "IsOwnGenerator"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "IsCustomMultiplier"; "CustomMultiplier"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "SmsrEnabled"; "SmsrStrength"; "SmsrStrengthLabel"; "IsSmsrOn"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "Bloom"; "BloomLabel"; "IsBloomOn"; "BloomWide"; "BloomWideLabel"; "OverSharpness"; "OverSharpnessLabel"; "StretchEnabled"
-                 "CaptureApiIndex"; "WindowModeIndex"; "CountdownIndex"; "QueueTargetIndex"
+        notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "IsSmai"; "IsOwnGenerator"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "IsCustomMultiplier"; "CustomMultiplier"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "SmsrEnabled"; "SmsrStrength"; "SmsrStrengthLabel"; "IsSmsrOn"; "IsDlss5On"; "Dlss5DllReady"; "Dlss5DllLabel"; "Dlss5DllPath"; "Dlss5ModelIndex"; "Dlss5StyleIndex"; "Dlss5PassesIndex"; "Dlss5Scale"; "Dlss5ScaleLabel"; "Dlss5Intensity"; "Dlss5IntensityLabel"; "Dlss5Tone"; "Dlss5ToneLabel"; "Dlss5Structure"; "Dlss5StructureLabel"; "Dlss5Skin"; "Dlss5SkinLabel"; "Dlss5Denoise"; "Dlss5DenoiseLabel"; "Dlss5Edge"; "Dlss5EdgeLabel"; "Dlss5KeepColors"; "Dlss5KeepColorsLabel"; "Dlss5LowLight"; "Dlss5LowLightLabel"; "Dlss5Brightness"; "Dlss5BrightnessLabel"; "Dlss5Contrast"; "Dlss5ContrastLabel"; "Dlss5Saturation"; "Dlss5SaturationLabel"; "Dlss5Warmth"; "Dlss5WarmthLabel"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "Bloom"; "BloomLabel"; "IsBloomOn"; "BloomWide"; "BloomWideLabel"; "OverSharpness"; "OverSharpnessLabel"; "StretchEnabled"
+                 "CaptureApiIndex"; "WindowModeIndex"; "CountdownSeconds"; "CountdownHint"; "QueueTargetIndex"
                  "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "GameFpsText"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
                  "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "MsmAiEnabled"; "XessTensorEnabled"; "IsXessTensorShown"; "HudAiEnabled"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "AmlGuideEnabled"; "LearningStatus"
                  "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "EvenPacingEnabled"; "UltraSmoothEnabled"; "TriangleMeshEnabled"; "IsTriangleMeshShown"; "IsTriangleMeshOpen"; "TriPitchIndex"; "TriRoundsIndex"; "TriFineIndex"; "TriFullIndex"; "TriHomeIndex"; "TriRangeIndex"; "TriExactIndex"; "TriRelaxIndex"; "FpsCounterEnabled"; "FpsCounterModeIndex"; "FpsCounterSizeIndex"; "LockRefreshEnabled"; "StatusNote"; "HasStatusNote" ]
@@ -265,7 +270,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                          Transparency = transparency; AdvancedOpen = advanced
                          StartWithWindows = startWithWindows; StartMinimized = startMinimized; MinimizeToTray = minimizeToTray; EngineLog = engineLog
                          Hotkey = hotkeyValue
-                         SelectedProfile = selected.Id; Profiles = profiles |> Seq.map _.Snapshot |> Seq.toArray }
+                         SelectedProfile = selected.Id; Profiles = profiles |> Seq.map _.Snapshot |> Seq.toArray; Console = consoleOptions }
     // A slider dragged across its range is one change for the engine, not fifty.
     let sendTimer = new Timer((fun _ -> post (fun () -> if not disposed then engine.Send selected.Options)), null, Timeout.Infinite, Timeout.Infinite)
     let sendOptions () = if engine.IsActive then sendTimer.Change(200, Timeout.Infinite) |> ignore
@@ -290,6 +295,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     // now: started by the shortcut with the game in front - that window is taken at once, no countdown (round 42).
     let startOrStop now =
         if engine.IsActive then engine.Stop()
+        elif selected.Options.Upscaler = 7 && not (not (String.IsNullOrWhiteSpace selected.Options.Dlss5Dll) && System.IO.File.Exists selected.Options.Dlss5Dll) then
+            dlss5DllPickRequested.Trigger()
         else
             engine.SetTexts(studyTexts ())
             engine.Start(selected.Options, now) |> ignore
@@ -317,8 +324,16 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             page <- target
             if target = "settings" then refreshLearned ()
             if target = "video" || target = "mods" then moreOpen <- true
-            notify [ "IsDisplay"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote"; "CurrentPage" ]
+            notify [ "IsDisplay"; "IsDisplayOrConsole"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsConsole"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote"; "CurrentPage" ]
     let displayCommand = RelayCommand(fun () -> navigate "display")
+    // Console Link (2026-11-16): its page and its own view model; its settings saved with the app's.
+    let consoleCommand = RelayCommand(fun () -> navigate "console")
+    // (Frame generation on the console's stream window is Super Motion as the profile has it - every technique; what is
+    //  changed on its cards while it plays reaches the engine as for any game.)
+    let consoleLink =
+        new ConsoleLinkModel(text, post, consoleOptions, (fun o -> consoleOptions <- o; persist ()),
+                             (fun hwnd -> (if engine.IsActive then engine.Stop()); engine.StartOnWindow(selected.Options, hwnd)),
+                             (fun () -> if engine.IsActive then engine.Stop()))
     let videoCommand = RelayCommand(fun () -> navigate "video")
     let modsCommand = RelayCommand(fun () -> navigate "mods")
     let moreCommand = RelayCommand(fun () ->
@@ -506,12 +521,31 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             addCommand.NotifyCanExecuteChanged()
         this.CancelDialog())
     let resetCommand = RelayCommand(fun () -> updateOptions (fun _ -> match systemVrr with Some on -> { Preferences.defaultOptions with Vrr = on } | None -> Preferences.defaultOptions))
+    let dlss5ResetCommand = RelayCommand(fun () ->
+        let d = Preferences.defaultOptions
+        updateOptions (fun o ->
+            { o with Dlss5Model = d.Dlss5Model; Dlss5Style = d.Dlss5Style; Dlss5Scale = d.Dlss5Scale; Dlss5Passes = d.Dlss5Passes
+                     Dlss5Intensity = d.Dlss5Intensity; Dlss5Tone = d.Dlss5Tone; Dlss5Structure = d.Dlss5Structure; Dlss5Skin = d.Dlss5Skin
+                     Dlss5Denoise = d.Dlss5Denoise; Dlss5Edge = d.Dlss5Edge; Dlss5KeepColors = d.Dlss5KeepColors; Dlss5LowLight = d.Dlss5LowLight
+                     Dlss5Brightness = d.Dlss5Brightness; Dlss5Contrast = d.Dlss5Contrast; Dlss5Saturation = d.Dlss5Saturation; Dlss5Warmth = d.Dlss5Warmth }))
+    let mutable needsCacheClean = AppData.needsClean ()
+    let cleanCacheCommand = RelayCommand(fun () ->
+        try if engine.IsActive then engine.Stop() with _ -> ()
+        try store.Cancel() with _ -> ()
+        AppData.cleanAndRestart ())
     let retrySaveCommand = RelayCommand(fun () -> store.Flush())
     let motionCommand = RelayCommand(toggleMotion)
     let shortcutCommand = RelayCommand(fun () -> this.BeginShortcutCapture())
+    let pickDlss5DllCommand = RelayCommand(fun () -> dlss5DllPickRequested.Trigger())
 
     do
         profiles |> Seq.filter (fun p -> p.Id = "default") |> Seq.iter (fun p -> p.Name <- this.Text.Default)
+        match profiles |> Seq.tryPick (fun p -> if not (String.IsNullOrWhiteSpace p.Options.Dlss5Dll) && System.IO.File.Exists p.Options.Dlss5Dll then Some p.Options.Dlss5Dll else None) with
+        | Some dll ->
+            for p in profiles do
+                if String.IsNullOrWhiteSpace p.Options.Dlss5Dll then
+                    p.Options <- { p.Options with Dlss5Dll = dll }
+        | None -> ()
         if isLinux then
             for p in profiles do
                 if p.Options.Generator <> 2 then p.Options <- { p.Options with Generator = 2 }
@@ -592,7 +626,6 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.Upscalers = upscalers
     member _.CaptureApis = [| "DXGI"; "WGC" |]
     member _.WindowModes = windowModes
-    member _.Countdowns = countdowns
     member _.QueueTargets = [| "0"; "1"; "2" |]
     member _.GpuPriorities = gpuPriorities
     member _.SyncModes = syncModes
@@ -623,9 +656,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                 themes |> Array.iteri (fun i item -> item.Label <- labels[i])
                 labelChoices ()
                 video.Relabel()
+                consoleLink.Retext()
                 profiles |> Seq.filter (fun p -> p.Id = "default") |> Seq.iter (fun p -> p.Name <- this.Text.Default)
                 notify [ "LanguageIndex"; "Text"; "DialogTitle"; "IsArabic"; "IsRightToLeft"; "UiFontFamily"; "NvidiaDrivers"; "AmdDrivers"; "IntelDrivers"; "GateText"; "GateActionText"; "AppUpdateText"; "VersionText"; "UpdateCheckText"
-                         "FrameLimitLabel"; "ShortcutLabel" ]
+                         "FrameLimitLabel"; "ShortcutLabel"; "Dlss5DllLabel"; "CountdownHint" ]
                 notifyLists ()
                 notifyEngine ()
                 if page = "settings" then refreshLearned ()
@@ -747,6 +781,85 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         and set value = if Double.IsFinite value then updateOptions (fun o -> { o with SmsrBoost = int (Math.Round(Math.Clamp(value, 0., 200.) / 5.)) * 5 - 100 })
     member _.SmsrStrengthLabel = sprintf "%d%%" (100 + selected.Options.SmsrBoost)
     member _.IsSmsrOn = selected.Options.Upscaler = 5
+    member _.IsDlss5On = selected.Options.Upscaler = 7
+    member _.Dlss5DllPath = selected.Options.Dlss5Dll
+    member _.Dlss5DllReady = not (String.IsNullOrWhiteSpace selected.Options.Dlss5Dll) && System.IO.File.Exists selected.Options.Dlss5Dll
+    member this.Dlss5DllLabel =
+        if this.Dlss5DllReady then sprintf "✓ %s" (System.IO.Path.GetFileName selected.Options.Dlss5Dll)
+        else this.Text.Dlss5DllMissing
+    member _.Dlss5DllPickRequested = dlss5DllPickRequested.Publish
+    member _.PickDlss5DllCommand = pickDlss5DllCommand
+    member _.SetDlss5Dll(path: string) =
+        let clean = if isNull path then "" else path.Trim()
+        for p in profiles do
+            if p.Id <> selected.Id then
+                p.Options <- { p.Options with Dlss5Dll = clean }
+        updateOptions (fun o -> { o with Dlss5Dll = clean })
+    member _.Dlss5Models = dlss5Models
+    member _.Dlss5ModelIndex
+        with get () = selected.Options.Dlss5Model
+        and set value = if value >= 0 && value <= 1 then updateOptions (fun o -> { o with Dlss5Model = value })
+    member _.Dlss5Styles = dlss5Styles
+    member _.Dlss5StyleIndex
+        with get () = selected.Options.Dlss5Style
+        and set value = if value >= 0 && value <= 2 then updateOptions (fun o -> { o with Dlss5Style = value })
+    member _.Dlss5PassesChoices = dlss5PassesChoices
+    member _.Dlss5PassesIndex
+        with get () = max 0 (selected.Options.Dlss5Passes - 1)
+        and set value = if value >= 0 && value <= 5 then updateOptions (fun o -> { o with Dlss5Passes = value + 1 })
+    member _.Dlss5Scale
+        with get () = float selected.Options.Dlss5Scale
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Scale = int (Math.Round(Math.Clamp(value, 25., 100.) / 5.)) * 5 })
+    member _.Dlss5ScaleLabel = sprintf "%d%%" selected.Options.Dlss5Scale
+    member _.Dlss5Intensity
+        with get () = float selected.Options.Dlss5Intensity
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Intensity = int (Math.Round(Math.Clamp(value, 0., 300.) / 5.)) * 5 })
+    member _.Dlss5IntensityLabel = sprintf "%d%%" selected.Options.Dlss5Intensity
+    member _.Dlss5Tone
+        with get () = float selected.Options.Dlss5Tone
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Tone = int (Math.Round(Math.Clamp(value, 0., 200.) / 5.)) * 5 })
+    member _.Dlss5ToneLabel = sprintf "%d%%" selected.Options.Dlss5Tone
+    member _.Dlss5Structure
+        with get () = float selected.Options.Dlss5Structure
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Structure = int (Math.Round(Math.Clamp(value, 0., 200.) / 5.)) * 5 })
+    member _.Dlss5StructureLabel = sprintf "%d%%" selected.Options.Dlss5Structure
+    member _.Dlss5Skin
+        with get () = float selected.Options.Dlss5Skin
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Skin = int (Math.Round(Math.Clamp(value, -100., 250.) / 5.)) * 5 })
+    member _.Dlss5SkinLabel = sprintf "%d%%" selected.Options.Dlss5Skin
+    member _.Dlss5Denoise
+        with get () = float selected.Options.Dlss5Denoise
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Denoise = int (Math.Round(Math.Clamp(value, 0., 100.) / 5.)) * 5 })
+    member _.Dlss5DenoiseLabel = sprintf "%d%%" selected.Options.Dlss5Denoise
+    member _.Dlss5Edge
+        with get () = float selected.Options.Dlss5Edge
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Edge = int (Math.Round(Math.Clamp(value, 0., 100.) / 5.)) * 5 })
+    member _.Dlss5EdgeLabel = sprintf "%d%%" selected.Options.Dlss5Edge
+    member _.Dlss5KeepColors
+        with get () = float selected.Options.Dlss5KeepColors
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5KeepColors = int (Math.Round(Math.Clamp(value, 0., 100.) / 5.)) * 5 })
+    member _.Dlss5KeepColorsLabel = sprintf "%d%%" selected.Options.Dlss5KeepColors
+    member _.Dlss5LowLight
+        with get () = float selected.Options.Dlss5LowLight
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5LowLight = int (Math.Round(Math.Clamp(value, 0., 100.) / 5.)) * 5 })
+    member _.Dlss5LowLightLabel = sprintf "%d%%" selected.Options.Dlss5LowLight
+    member _.Dlss5Brightness
+        with get () = float selected.Options.Dlss5Brightness
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Brightness = int (Math.Round(Math.Clamp(value, -100., 100.) / 5.)) * 5 })
+    member _.Dlss5BrightnessLabel = sprintf "%d%%" selected.Options.Dlss5Brightness
+    member _.Dlss5Contrast
+        with get () = float selected.Options.Dlss5Contrast
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Contrast = int (Math.Round(Math.Clamp(value, -100., 100.) / 5.)) * 5 })
+    member _.Dlss5ContrastLabel = sprintf "%d%%" selected.Options.Dlss5Contrast
+    member _.Dlss5Saturation
+        with get () = float selected.Options.Dlss5Saturation
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Saturation = int (Math.Round(Math.Clamp(value, -100., 100.) / 5.)) * 5 })
+    member _.Dlss5SaturationLabel = sprintf "%d%%" selected.Options.Dlss5Saturation
+    member _.Dlss5Warmth
+        with get () = float selected.Options.Dlss5Warmth
+        and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Dlss5Warmth = int (Math.Round(Math.Clamp(value, -100., 100.) / 5.)) * 5 })
+    member _.Dlss5WarmthLabel = sprintf "%d%%" selected.Options.Dlss5Warmth
+    member _.Dlss5ResetCommand = dlss5ResetCommand
     member _.Sharpness
         with get () = float selected.Options.Sharpness
         and set value = if Double.IsFinite value then updateOptions (fun o -> { o with Sharpness = int (Math.Round(Math.Clamp(value, 0., 100.))) })
@@ -777,7 +890,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         with get () = selected.Options.Spout
         and set value = updateOptions (fun o -> { o with Spout = value })
     /// The two sliders do something once an upscaler is picked.
-    member _.IsSharpnessOpen = selected.Options.Upscaler = 1 || selected.Options.Upscaler = 4 || selected.Options.Upscaler = 5
+    member _.IsSharpnessOpen = selected.Options.Upscaler = 1 || selected.Options.Upscaler = 4 || selected.Options.Upscaler = 5 || selected.Options.Upscaler = 6 || selected.Options.Upscaler = 7
 
     // Advanced: each row is one option of the engine (Models/Preferences.fs).
     member _.CaptureApiIndex
@@ -786,9 +899,15 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.WindowModeIndex
         with get () = selected.Options.WindowMode
         and set value = if value >= 0 then updateOptions (fun o -> { o with WindowMode = value })
-    member _.CountdownIndex
-        with get () = selected.Options.Countdown
-        and set value = if value >= 0 then updateOptions (fun o -> { o with Countdown = value })
+    member _.CountdownSeconds
+        with get () = Nullable(decimal selected.Options.Countdown)
+        and set (value: Nullable<decimal>) =
+            if value.HasValue && value.Value >= 0m && value.Value <= decimal Preferences.countdownMax then
+                let secs = int (Math.Round value.Value)
+                updateOptions (fun o -> { o with Countdown = secs })
+    member this.CountdownHint =
+        if selected.Options.Countdown = 0 then this.Text.CountdownDirect
+        else String.Format(this.Text.Seconds, selected.Options.Countdown)
     member _.QueueTargetIndex
         with get () = selected.Options.QueueTarget
         and set value = if value >= 0 then updateOptions (fun o -> { o with QueueTarget = value })
@@ -968,7 +1087,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     // (Its own settings, shown while it is on with SMFG - each changed while it runs.)
     // (Round 101: DLSS MFG and XeSS MFG as well - the engine hands them the motion the triangles read. Not SMAI.)
     member _.IsTriangleMeshShown = selected.Options.Generator <> 3
-    member _.IsTriangleMeshOpen = not isLinux && selected.Options.Generator = 2 && selected.Options.TriangleMesh
+    member _.IsTriangleMeshOpen = (selected.Options.Generator = 2 || isLinux) && selected.Options.TriangleMesh
     member _.TriPitches = triPitchItems
     member _.TriPitchIndex
         with get () = Preferences.triPlace Preferences.triPitches 0 selected.Options.TriPitch
@@ -1050,7 +1169,10 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.StatusText =
         let text = this.Text
         match engineStatus.Phase with
-        | Picking -> String.Format(text.StatusPicking, max 0 engineStatus.Countdown)
+        | Picking ->
+            if engineStatus.Countdown = 0 then text.StatusPickingClick
+            elif engineStatus.Countdown > 0 then String.Format(text.StatusPicking, engineStatus.Countdown)
+            else text.StatusStarting
         | Starting -> text.StatusStarting
         | Running ->
             if engineStatus.MfgUnavailable then text.StatusUnavailable.Replace("DLSS MFG", this.GeneratorName)
@@ -1123,6 +1245,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             helpGuideOpen <- value
             notify [ "IsHelpGuideOpen" ]
     member _.IsSupport = page = "support"
+    member _.IsConsole = page = "console"
+    // (Super Motion's cards: its page, and Console Link's under the console's own - the same cards, every technique.)
+    member _.IsDisplayOrConsole = page = "display" || page = "console"
+    member _.ConsoleLink = consoleLink
+    member _.ConsoleCommand = consoleCommand
     member _.Video = video
     member _.IsSettings = page = "settings"
     member _.IsHelp = page = "help"
@@ -1263,6 +1390,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     member _.CancelCommand = cancelCommand
     member _.ConfirmDeleteCommand = confirmDeleteCommand
     member _.ResetCommand = resetCommand
+    member _.NeedsCacheClean = needsCacheClean
+    member _.CleanCacheCommand = cleanCacheCommand
     member _.RetrySaveCommand = retrySaveCommand
     member _.Flush() = store.Flush()
     member _.SaveError = store.SaveError

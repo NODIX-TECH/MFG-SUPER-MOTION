@@ -153,7 +153,7 @@ static struct FgState {
     NVSDK_NGX_Handle *feature = nullptr;
     StagedTexture depth;
     winrt::com_ptr<ID3D12Resource> motion;
-    std::shared_ptr<FgReal> reals[6];     // the pool: four pairs in flight, each with the frame before it, and the next
+    std::shared_ptr<FgReal> reals[10];     // the pool: up to eight pairs in flight, each with the frame before it, and the next
     std::shared_ptr<FgReal> latest;       // the real frame of the pair before (the loop's thread)
     winrt::com_ptr<ID3D12Resource> output[5];
     unsigned room = 0;          // the frames in between a pair has places for (FgRoom, when they were made)
@@ -161,7 +161,7 @@ static struct FgState {
     UINT w = 0, height = 0, mw = 0, mh = 0;
     UINT full_w = 0, full_h = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    FgSlot slots[4];
+    FgSlot slots[8];
     std::mutex mutex;
     std::condition_variable wake;
     std::thread thread;
@@ -303,8 +303,13 @@ static bool FgDumpWanted(UINT64 n) { return n == 30 || n == 90 || n == 150 || n 
 // now: 38% / 7%, at about 2 ms more of the card a pair. SM_FG_EVERY=0: two, as before (to compare).
 static unsigned FgMadeCount(unsigned count, bool rebuilt)
 {
-    static const bool two = [] { char v[4] = {}; return GetEnvironmentVariableA("SM_FG_EVERY", v, sizeof(v)) > 0 && v[0] == '0'; }();
-    return (rebuilt && two && count >= 4) ? 2u : count;
+    static const int mode = [] {
+        char v[4] = {};
+        if (GetEnvironmentVariableA("SM_FG_EVERY", v, sizeof(v)) == 0) return -1;
+        return v[0] == '1' ? 1 : v[0] == '0' ? 0 : -1;
+    }();
+    if (!rebuilt || count < 4 || mode == 1) return count;
+    return mode == 0 ? 2u : 3u;
 }
 
 // Which of the generator's frames a frame in between goes by (0..made-1), or
@@ -435,13 +440,13 @@ static HANDLE g_fg_done_stop = nullptr;
 static std::thread g_fg_done_thread;
 static void FgDoneWatch()
 {
-    HANDLE handles[5] = {};
-    for (int i = 0; i < 4; ++i) handles[i] = g_fg.slots[i].done_event;
-    handles[4] = g_fg_done_stop;
+    HANDLE handles[9] = {};
+    for (int i = 0; i < 8; ++i) handles[i] = g_fg.slots[i].done_event;
+    handles[8] = g_fg_done_stop;
     for (;;)
     {
-        const DWORD got = WaitForMultipleObjects(5, handles, FALSE, INFINITE);
-        if (got < WAIT_OBJECT_0 || got >= WAIT_OBJECT_0 + 4) return;
+        const DWORD got = WaitForMultipleObjects(9, handles, FALSE, INFINITE);
+        if (got < WAIT_OBJECT_0 || got >= WAIT_OBJECT_0 + 8) return;
         FgSlot &slot = g_fg.slots[got - WAIT_OBJECT_0];
         const UINT64 mark = slot.watched.load();
         if (mark && lfCore.timeline && lfCore.timeline->GetCompletedValue() >= mark && slot.done_at.load() == 0.0)
@@ -632,6 +637,7 @@ static void FgPresenter()
     // What the screen gets of what is asked (g_fg_count_cap): this second's frames in between given and
     // shown, the count the pairs had, seconds in a row short or whole, and when one more may be tried.
     unsigned given = 0, given_shown = 0, given_pairs = 0, pair_count = 0, short_seconds = 0, whole_seconds = 0, quiet_seconds = 0;
+    unsigned beats_missed = 0;
     ULONGLONG try_more_after = 0, cap_raised_at = 0, try_wait = 60000;
     auto report =std::chrono::steady_clock::now();
     auto reportCadence = [&] {
@@ -1276,7 +1282,7 @@ static void FgPresenter()
         const bool fits = span <= 0.0 || (chosen->count + 1) <= 1.02 * span * OutputRefresh();
         bool scheduled = chosen->interpolate && span > 0.0 && !irregular;
         pace.cover_all = chosen->ad_on && chosen->interpolate;
-        quick = chosen->interpolate && step > 0.0 && step < 0.0035 && !dumped;
+        quick = chosen->interpolate && step > 0.0 && step < 0.0055 && !dumped;
         // Round 91 (tests\smooth: GitHub #83's "as if MFG switched off and on"): a pair with nothing in between - the
         // first after the game rested, after a cut, the generator starting fresh - forgot the delay and showed its
         // real frame at once; the next pair was shown at the delay again, so that frame stood the delay longer than
@@ -1387,7 +1393,10 @@ static void FgPresenter()
             stood("drawing a frame (waiting for the card)", began);
             return 1;
         };
+        const bool by_beat = chosen->ad_on && chosen->interpolate && !irregular;
+        double beat_first = 0.0;
         auto present = [&](const Planned &f, const Drawn &d) {
+            release(false);
             ad_phase_now = f.ad_phase;
             const bool synthetic = f.synthetic;
             const double moment = f.moment, source_time = f.source_time;
@@ -1417,7 +1426,7 @@ static void FgPresenter()
                 copied = true;
             }
             const bool led = first;
-            if (first) { first = false; schedule(began, drawn, ad_phase_now >= 0.0 ? moment : 0.0); }
+            if (first) { first = false; schedule(began, drawn, ad_phase_now >= 0.0 ? (beat_first > 0.0 ? beat_first : moment) : 0.0); }
             // The generator said, once its work was done, that this pair has
             // no frames in between to show: the next picture is drawn over it.
             // (Only one at a time is drawn where that can come after the drawing: DLSS MFG, FgDrawAhead.)
@@ -1437,7 +1446,9 @@ static void FgPresenter()
                     // frame after it is that much later: the delay is what the late frame left it, and comes back
                     // slowly (FgPace::Took). Made up, the pair's frames stood closer than a step - the picture faster
                     // for a pair after every frame that came late.)
-                    if (SmoothOn() && late_by > 0.0005 && late_by < span) pace.delay += late_by;
+                    if (SmoothOn() && late_by > 0.0005 && late_by < span &&
+                        (pace.usual <= 0.0 || pace.delay < (FgQueueTarget() + 0.25) * pace.usual))
+                        pace.delay += late_by;
                     else if (late_by > 0.0005 && late_by < span) { slip = late_by; slip_from = phase_now; }
                 }
                 const double when = moment + pace.delay - pace.call + slipped(phase_now), ahead = when - LatencyNow();
@@ -1472,7 +1483,7 @@ static void FgPresenter()
             // rate" off): none waits for the screen to take the one before -
             // the screen shows the newest at each refresh.
             // (VSync: every frame has a turn of the screen's to wait for.)
-            if (lfShow.vrr || SyncEvery() > 0 || (smOpt.screen_limit.load() != 0 && fits)) waitForPresent();
+            if (SyncEvery() > 0 || ((lfShow.vrr || smOpt.screen_limit.load() != 0) && fits)) waitForPresent();
             if (g_fg.stop) return;
             trace_content = moment;
             trace_phase = phase;
@@ -1485,7 +1496,7 @@ static void FgPresenter()
             wave(moment);
             stood("the Present", called);
             // (What drawing takes is learnt from frames drawn just before their moments only.)
-            pace.Took(led || d.ahead ? -1.0 : drawn - began, called - asked, LatencyNow() - called, synthetic);
+            pace.Took(d.ahead ? -1.0 : drawn - began, called - asked, LatencyNow() - called, synthetic);
         };
         // The plan run: drawn up to `window` ahead of the one shown next; one is as before - drawn, then shown.
         auto run = [&](const std::vector<Planned> &plan, unsigned window) {
@@ -1498,7 +1509,7 @@ static void FgPresenter()
                     const Planned &f = plan[next];
                     // Too late to be told from the next one: shown now it would only push that one back (the
                     // two-at-once of before).
-                    if (f.pass_at > 0.0 && LatencyNow() > f.pass_at + pace.delay + (f.slip_phase >= 0.0 ? slipped(f.slip_phase) : 0.0))
+                    if (!(by_beat && pace.delay <= 0.0) && f.pass_at > 0.0 && LatencyNow() > f.pass_at + pace.delay + (f.slip_phase >= 0.0 ? slipped(f.slip_phase) : 0.0))
                     { ++pace.skipped; ++late_frames; ++next; continue; }
                     Drawn d = {};
                     const int got = prepare(f, static_cast<unsigned>(ready.size()), d);
@@ -1516,7 +1527,7 @@ static void FgPresenter()
         plan.reserve(8);
         if (irregular) { pace.skipped += chosen->count; odd_frames += chosen->count; }
         // Adaptive MFG: each beat at its own moment - a frame in between made for it, or a real frame near it.
-        if (chosen->ad_on && chosen->interpolate && !irregular)
+        if (by_beat)
         {
             const double beat_fps = AdaptiveTarget();
             const double beat = beat_fps > 0.0 ? 1.0 / beat_fps : step;
@@ -1532,6 +1543,7 @@ static void FgPresenter()
                 plan.push_back({ picture, what >= 0, when, what >= 0 ? 0.0 : chosen->source_time, what >= 0 ? static_cast<unsigned>(what) : 0u,
                                  chosen->ad_phase[b], dumped ? 0.0 : when + 0.75 * beat, -1.0 });
             }
+            if (!plan.empty()) beat_first = plan.front().moment;
         }
         else if (chosen->interpolate && !irregular)
         {
@@ -1546,10 +1558,20 @@ static void FgPresenter()
                                  dumped ? 0.0 : moment + (quick ? 3.0 : 0.75) * step, double(index + 1) / double(chosen->count + 1) });
             }
         }
-        if (!(chosen->ad_on && chosen->interpolate && !irregular))
+        if (!by_beat)
             plan.push_back({ chosen->real->full.get(), false, chosen->moment, chosen->source_time, 0, -1.0, 0.0, -1.0 });
-        run(plan, FgDrawAhead(stamps != nullptr || dumping, plan.empty() ? 0u : static_cast<unsigned>(plan.size() - 1)));
-        if (chosen->ad_on && chosen->interpolate && !irregular && chosen->real && chosen->real->full &&
+        const unsigned window = (by_beat && pace.delay <= 0.0) ? 1u
+            : FgDrawAhead(stamps != nullptr || dumping, plan.empty() ? 0u : static_cast<unsigned>(plan.size() - 1));
+        run(plan, window);
+        if (by_beat && !plan.empty() && !dumped)
+        {
+            if (first)
+            {
+                if (++beats_missed >= 3 && pace.delay > 0.0) { pace.Forget(); beats_missed = 0; }
+            }
+            else beats_missed = 0;
+        }
+        if (by_beat && chosen->real && chosen->real->full &&
             (plan.empty() || plan.back().synthetic || plan.back().picture != chosen->real->full.get()))
         {
             const double beat_fps = AdaptiveTarget();
@@ -1631,7 +1653,10 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
     const double scale = lines < full_h ? double(lines) / full_h : 1.0;
     const UINT w = scale < 1 ? (UINT(std::round(full_w * scale / 8.0)) * 8u) : full_w;
     const UINT height = scale < 1 ? lines : full_h;
-    if ((XeSelected() ? XeLive() : MsmSelected() ? MsmLive(full_w, full_h, format, FlowShare()) : g_fg.feature != nullptr) &&
+    const int msm_flow = (MsmSelected() && smOpt.msm_ai.load() == 0 && g_fg_count >= 4 && smOpt.game.load() != kGameAsSet &&
+                          smOpt.adaptive.load() <= 0 && !(smOpt.aml.load() && smOpt.aml_flow.load() && g_learn_flow.load() > 0))
+                         ? std::min(FlowShare(), 30) : FlowShare();
+    if ((XeSelected() ? XeLive() : MsmSelected() ? MsmLive(full_w, full_h, format, msm_flow) : g_fg.feature != nullptr) &&
         g_fg.w == w && g_fg.height == height && g_fg.mw == v.work_w &&
         g_fg.mh == v.work_h && g_fg.full_w == full_w && g_fg.full_h == full_h &&
         g_fg.format == format && g_fg.room == FgRoom() && g_fg.thread.joinable()) return true;
@@ -1834,7 +1859,7 @@ static bool EnsureFg(Pipeline &v, DXGI_FORMAT format)
     // XeSS MFG: the library's swap chain at the size frames in between are made at.
     if (XeSelected() && !XeReady(w, height, format)) return false;
     // MSM FG: its passes, and what they work in for pictures of this size.
-    if (MsmSelected() && !MsmReady(full_w, full_h, format, FlowShare())) return false;
+    if (MsmSelected() && !MsmReady(full_w, full_h, format, msm_flow)) return false;
     g_fg.w = w; g_fg.height = height; g_fg.full_w = full_w; g_fg.full_h = full_h;
     g_fg.mw = v.work_w; g_fg.mh = v.work_h; g_fg.format = format;
     g_fg.stop = false;

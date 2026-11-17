@@ -243,17 +243,81 @@ static HMONITOR MonitorByNumber(int number)
 
 // ---- Taking a window -------------------------------------------------------
 
+// Top-level window of another application directly under the mouse cursor.
+static HWND ClickedNonOwnWindow(HWND &clicked_raw)
+{
+    clicked_raw = nullptr;
+    POINT pt = {};
+    if (!GetCursorPos(&pt)) return nullptr;
+    const HWND under = WindowFromPoint(pt);
+    if (!under) return nullptr;
+    const HWND root = GetAncestor(under, GA_ROOT);
+    const HWND candidate = root ? root : under;
+    if (OwnWindow(candidate)) return nullptr;
+    clicked_raw = candidate;
+    if (CouldBeSource(candidate)) return candidate;
+    const HWND owner = GetAncestor(candidate, GA_ROOTOWNER);
+    if (owner && owner != candidate && !OwnWindow(owner) && CouldBeSource(owner)) return owner;
+    return nullptr;
+}
+
 // The count: who is in front, until someone has been for half a second or the
-// time is up. `cancelled` is asked ten times a second; the app is told each
-// second that goes by. Null when nobody was there to take.
+// time is up. When seconds == 0: take the game already in front at once (hotkey),
+// or if the app itself is in front, wait for the user's direct click on any
+// target window. `cancelled` is asked frequently; the app is told each second
+// (or 0 in direct-click mode). Null when nobody was picked or stopped.
 static HWND PickWindow(int seconds, bool (*cancelled)())
 {
+    const int clamped = std::clamp(seconds, 0, 120);
+    if (clamped == 0)
+    {
+        if (const HWND front = OtherAppInFront()) return front;
+        Trace("[source] waiting for direct click on the target window (0 s)");
+        Status("@pick 0");
+        HWND seen = nullptr;
+        double seen_at = 0.0;
+        bool was_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        for (;;)
+        {
+            if (cancelled && cancelled()) return nullptr;
+            const double now = LatencyNow();
+            const bool down_now = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            const bool clicked = down_now && !was_down;
+            was_down = down_now;
+            if (clicked)
+            {
+                HWND raw = nullptr;
+                const HWND target = ClickedNonOwnWindow(raw);
+                if (target)
+                {
+                    Sleep(60);
+                    if (cancelled && cancelled()) return nullptr;
+                    const HWND fg = OtherAppInFront();
+                    return fg ? fg : target;
+                }
+                if (raw != nullptr)
+                {
+                    for (int k = 0; k < 6; ++k)
+                    {
+                        Sleep(30);
+                        if (cancelled && cancelled()) return nullptr;
+                        if (const HWND fg = OtherAppInFront()) return fg;
+                    }
+                }
+            }
+            const HWND front = OtherAppInFront();
+            if (front && front != seen) { seen = front; seen_at = now; }
+            if (front && now - seen_at >= 0.15) return front;
+            Sleep(25);
+        }
+    }
+
     const double kClickSettles = 0.5;
-    const double start = LatencyNow(), deadline = start + std::clamp(seconds, 0, 30);
+    const double start = LatencyNow(), deadline = start + clamped;
     HWND seen = nullptr;
     double seen_at = 0.0;
     int told = -1;
-    Trace("[source] select an application within %d seconds", seconds);
+    Trace("[source] select an application within %d seconds", clamped);
     for (;;)
     {
         if (cancelled && cancelled()) return nullptr;

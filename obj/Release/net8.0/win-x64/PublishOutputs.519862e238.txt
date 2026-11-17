@@ -111,6 +111,16 @@ C:\dev\mfg super motion pub\Engine\xess\libxell.dll
 C:\dev\mfg super motion pub\Engine\xess\libxess_fg.dll
 C:\dev\mfg super motion pub\Engine\xess\XeFGUnlock.asi
 C:\dev\mfg super motion pub\Engine\xess\XeFGUnlock.ini
+C:\dev\mfg super motion pub\Console\mfgsm-console.exe
+C:\dev\mfg super motion pub\Console\avcodec-62.dll
+C:\dev\mfg super motion pub\Console\avutil-60.dll
+C:\dev\mfg super motion pub\Console\swresample-6.dll
+C:\dev\mfg super motion pub\Console\licenses\chiaki-ng-COPYING.txt
+C:\dev\mfg super motion pub\Console\licenses\FFmpeg-LICENSE.txt
+C:\dev\mfg super motion pub\Console\xbox\player.html
+C:\dev\mfg super motion pub\Console\xbox\player.js
+C:\dev\mfg super motion pub\Console\xbox\xCloudPlayer.min.js
+C:\dev\mfg super motion pub\Console\licenses\xbox-xcloud-player-LICENSE.txt
 C:\dev\mfg super motion pub\ModKit\examples\FpsGraph\FpsGraph.cs
 C:\dev\mfg super motion pub\ModKit\examples\FpsGraph\FpsGraph.csproj
 C:\dev\mfg super motion pub\ModKit\examples\FpsGraph\mod.json

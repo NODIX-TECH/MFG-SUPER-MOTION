@@ -79,7 +79,13 @@ type MainWindow() as this =
                             "SmoothWhatIs", (fun (m: MainViewModel) -> m.Text.UltraSmooth, m.Text.WhatIsUltraSmooth)
                             "TriWhatIs", (fun (m: MainViewModel) -> m.Text.TriangleMesh, m.Text.WhatIsTriangleMesh)
                             "StretchWhatIs", (fun (m: MainViewModel) -> m.Text.Stretch, m.Text.WhatIsStretch)
-                            "LockWhatIs", (fun (m: MainViewModel) -> m.Text.LockRefresh, m.Text.WhatIsLockRefresh) ] do
+                            "LockWhatIs", (fun (m: MainViewModel) -> m.Text.LockRefresh, m.Text.WhatIsLockRefresh)
+                            "ConsoleIntroWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleLink, m.Text.ConsoleIntro)
+                            "ConsoleLinkWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleYourLink, m.ConsoleLink.LinkText)
+                            "ConsolePlayingWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleLink, m.ConsoleLink.MenuHelp)
+                            "ConsoleAccountWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleAccount, m.Text.ConsoleSignInHelp + "\n\n" + m.Text.ConsolePinHelp)
+                            "ConsoleXboxWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleXboxAccount, m.Text.ConsoleXboxSignInHelp + "\n\n" + m.Text.ConsoleXboxHelp)
+                            "ConsoleStreamWhatIs", (fun (m: MainViewModel) -> m.Text.ConsoleStream, m.Text.ConsoleCardsBelow + "\n\n" + m.ConsoleLink.MenuHelp) ] do
             let button = this.FindControl<Button>(name)
             if not (isNull button) then
                 button.Click.Add(fun _ ->
@@ -181,13 +187,36 @@ type MainWindow() as this =
                         | None -> ()
                     } |> ignore
                 | None -> ())
+        let pickDlss5Dll (model: MainViewModel) =
+            task {
+                let dlls = FilePickerFileType("nvngx_dlssnr.dll", Patterns = [| "nvngx_dlssnr.dll"; "*.dll" |])
+                let options = FilePickerOpenOptions(Title = model.Text.Dlss5Dll, AllowMultiple = false, FileTypeFilter = [| dlls; FilePickerFileTypes.All |])
+                let! files = this.StorageProvider.OpenFilePickerAsync(options)
+                match files |> Seq.tryHead |> Option.bind (fun f -> match f.TryGetLocalPath() with | null -> None | path -> Some path) with
+                | Some path -> model.SetDlss5Dll path
+                | None -> ()
+            } |> ignore
         // Performance (DLSS MFG's preset C) picked: why it is not advised, in the same small window.
         let mutable heard = null
         this.DataContextChanged.Add(fun _ ->
             match this.DataContext with
             | :? MainViewModel as model when not (obj.ReferenceEquals(heard, model)) ->
                 heard <- model
+                model.Dlss5DllPickRequested.Add(fun () -> Dispatcher.UIThread.Post(fun () -> pickDlss5Dll model))
                 model.PresetCPicked.Add(fun () -> this.ShowWhatIs(model.Text.PresetPerformance, model.Text.PresetCWarning))
+                // Console Link: the stream's F1 / Guide + Start brings this window over the game, on its Console Link page
+                // (Super Motion's cards, every technique); "Back to the game" puts it behind again.
+                model.ConsoleLink.MenuRequested.Add(fun () ->
+                    Dispatcher.UIThread.Post(fun () ->
+                        model.Navigate "console"
+                        if this.WindowState = WindowState.Minimized then this.WindowState <- WindowState.Normal
+                        this.Show()
+                        this.Topmost <- true
+                        this.Activate()))
+                model.ConsoleLink.BackToGame.Add(fun () ->
+                    Dispatcher.UIThread.Post(fun () ->
+                        this.Topmost <- false
+                        this.WindowState <- WindowState.Minimized))
             | _ -> ())
 
     // (Round 72: also a mod's ShowMessage - Views\ModHost.fs.)

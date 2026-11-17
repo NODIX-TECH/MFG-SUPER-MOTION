@@ -20,7 +20,8 @@ open System.Text
 /// (Round 101: Tri - "Triangle Mesh": SMFG's frames by a mesh of triangles, Linux\engine\tri_vk.inl.)
 /// (Round 114: TriPitch .. TriRelax - SMT's own numbers from its gear, as the Windows engine's tri_* keys.)
 type LinuxSettings = { Enabled: bool; Multiplier: int; Flow: int; Fast: bool; Adaptive: bool; Target: int; Aml: bool; AmlFlow: bool; Game: int; Smsr: bool; SmsrStrength: int; Tri: bool
-                       TriPitch: int; TriRounds: int; TriFine: int; TriFull: int; TriHome: int; TriTop: int; TriExact: int; TriRelax: int }
+                       TriPitch: int; TriRounds: int; TriFine: int; TriFull: int; TriHome: int; TriTop: int; TriExact: int; TriRelax: int
+                       Smooth: bool; EvenPacing: bool; LowLatency: bool; Vrr: bool; Hdr: bool; ScreenLimit: bool }
 
 /// Aml: what Adaptive Motion Learning says, as the Windows engine's line does - off | learning <percent> | learned <percent> <delay ms>.
 type LinuxStatus = { Program: string; GameFps: int; ShownFps: int; Working: bool; Size: string; Aml: string }
@@ -44,7 +45,8 @@ module LinuxLayer =
     let launchOption = "MFGSM=1 %command%"
 
     let defaults = { Enabled = false; Multiplier = 2; Flow = 35; Fast = true; Adaptive = false; Target = 120; Aml = false; AmlFlow = true; Game = 0; Smsr = false; SmsrStrength = 100; Tri = false
-                     TriPitch = 16; TriRounds = 2; TriFine = 2; TriFull = 2; TriHome = 4; TriTop = 3; TriExact = 2; TriRelax = 2 }
+                     TriPitch = 16; TriRounds = 2; TriFine = 2; TriFull = 2; TriHome = 4; TriTop = 3; TriExact = 2; TriRelax = 2
+                     Smooth = false; EvenPacing = true; LowLatency = true; Vrr = false; Hdr = false; ScreenLimit = false }
 
     let readSettings () =
         try
@@ -68,7 +70,13 @@ module LinuxLayer =
                   SmsrStrength = Math.Clamp(number "smsr_strength" 100, 0, 200)
                   Tri = number "tri" 0 <> 0
                   TriPitch = number "tri_pitch" 16; TriRounds = number "tri_rounds" 2; TriFine = number "tri_fine" 2; TriFull = number "tri_full" 2
-                  TriHome = number "tri_home" 4; TriTop = number "tri_top" 3; TriExact = number "tri_exact" 2; TriRelax = number "tri_relax" 2 }
+                  TriHome = number "tri_home" 4; TriTop = number "tri_top" 3; TriExact = number "tri_exact" 2; TriRelax = number "tri_relax" 2
+                  Smooth = number "smooth" 0 <> 0
+                  EvenPacing = number "fixed_beat" 1 <> 0
+                  LowLatency = number "low_latency" 1 <> 0
+                  Vrr = number "vrr" 0 <> 0
+                  Hdr = number "hdr" 0 <> 0
+                  ScreenLimit = number "screen_limit" 0 <> 0 }
         with _ -> defaults
 
     let writeSettings (s: LinuxSettings) =
@@ -91,6 +99,9 @@ module LinuxLayer =
             for key, value in [ "tri_pitch", s.TriPitch; "tri_rounds", s.TriRounds; "tri_fine", s.TriFine; "tri_full", s.TriFull
                                 "tri_home", s.TriHome; "tri_top", s.TriTop; "tri_exact", s.TriExact; "tri_relax", s.TriRelax ] do
                 text.Append(key).Append('=').AppendLine(string value) |> ignore
+            for key, on in [ "smooth", s.Smooth; "fixed_beat", s.EvenPacing; "low_latency", s.LowLatency
+                             "vrr", s.Vrr; "hdr", s.Hdr; "screen_limit", s.ScreenLimit ] do
+                text.Append(key).Append('=').AppendLine(if on then "1" else "0") |> ignore
             let temporary = configFile + ".new"
             File.WriteAllText(temporary, text.ToString())
             File.Move(temporary, configFile, true)

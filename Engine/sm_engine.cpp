@@ -124,6 +124,7 @@
 #include "lf_pipeline.inl"
 #include "lf_ngx.inl"
 #include "lf_bloom.inl"
+#include "lf_dlss5.inl"
 #include "lf_show.inl"
 #include "xe_mfg.inl"
 #include "lf_timing.inl"
@@ -179,6 +180,180 @@ static VOID CALLBACK SmDllProbe(ULONG reason, const SmDllLoaded *data, PVOID)
     }
     Trace("[dll] %.*ls loaded, from %s", int(data->BaseDllName->Length / 2), data->BaseDllName->Buffer, from);
 }
+
+static int TestDlss5(UINT test_w, UINT test_h)
+{
+    smOpt.upscaler = 7;
+    if (!NgxStart()) { printf("FAIL: NgxStart\n"); return 1; }
+    const UINT W = test_w, H = test_h;
+    const ULONGLONG t_warm0 = GetTickCount64();
+    Dlss5WarmupStart();
+    if (!Dlss5PrepareSession(W, H)) { printf("FAIL: Dlss5PrepareSession\n"); Dlss5Close(); return 1; }
+    const ULONGLONG warm_ms = GetTickCount64() - t_warm0;
+    Pipeline pipe = {};
+    if (!PipelineBuild(pipe, W, H, 0, 0)) { printf("FAIL: PipelineBuild\n"); Dlss5Close(); return 1; }
+
+    ID3D12Resource *readback = nullptr;
+    D3D12_HEAP_PROPERTIES rb_hp = {};
+    rb_hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC rb_desc = {};
+    rb_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rb_desc.Width = pipe.picture.staging->GetDesc().Width;
+    rb_desc.Height = 1; rb_desc.DepthOrArraySize = 1; rb_desc.MipLevels = 1;
+    rb_desc.SampleDesc.Count = 1; rb_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(lfCore.device->CreateCommittedResource(&rb_hp, D3D12_HEAP_FLAG_NONE, &rb_desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void **>(&readback))))
+    {
+        printf("FAIL: readback buffer\n");
+        PipelineRelease(pipe);
+        Dlss5Close();
+        return 1;
+    }
+
+    auto fill_pattern = [&](std::vector<BYTE> &buf, int frame) {
+        buf.resize(static_cast<size_t>(W) * H * 4);
+        const int sx = frame * 3, sy = frame * 2;
+        for (UINT y = 0; y < H; ++y)
+        {
+            BYTE *row = buf.data() + static_cast<size_t>(y) * W * 4;
+            for (UINT x = 0; x < W; ++x)
+            {
+                const int px = static_cast<int>(x) + sx, py = static_cast<int>(y) + sy;
+                int r = 0, g = 0, b = 0;
+                if (x >= 420 && x < 780 && y >= 340 && y < 740)
+                {
+                    // Warm skin-like patch with fine shading.
+                    r = 195 + ((px ^ py) & 15);
+                    g = 142 + ((px + py) & 15);
+                    b = 118 + ((py) & 15);
+                }
+                else if (x < 320 && y >= 760)
+                {
+                    // Low-light dark shadow region.
+                    r = 10 + ((px / 8 + py / 8) & 1) * 18;
+                    g = 12 + ((px / 16) & 1) * 14;
+                    b = 16 + ((py / 16) & 1) * 20;
+                }
+                else
+                {
+                    const int checker = (((px / 8) + (py / 8)) & 1) ? 45 : 175;
+                    r = std::clamp(checker + static_cast<int>((x * 60) / W), 0, 255);
+                    g = std::clamp(checker + static_cast<int>((y * 70) / H), 0, 255);
+                    b = std::clamp(220 - checker + (((px + py) / 4) & 31), 0, 255);
+                }
+                row[x * 4 + 0] = static_cast<BYTE>(r);
+                row[x * 4 + 1] = static_cast<BYTE>(g);
+                row[x * 4 + 2] = static_cast<BYTE>(b);
+                row[x * 4 + 3] = 255;
+            }
+        }
+    };
+
+    auto read_picture = [&](std::vector<BYTE> &out) -> bool {
+        out.resize(static_cast<size_t>(W) * H * 4);
+        if (!CmdOpen()) return false;
+        D3D12_RESOURCE_BARRIER in = Barrier(pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        lfCore.cmd->ResourceBarrier(1, &in);
+        D3D12_TEXTURE_COPY_LOCATION src_loc = {}, dst_loc = {};
+        src_loc.pResource = pipe.picture.gpu_tex;
+        src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst_loc.pResource = readback;
+        dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst_loc.PlacedFootprint = pipe.picture.layout;
+        lfCore.cmd->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+        D3D12_RESOURCE_BARRIER back = Barrier(pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        lfCore.cmd->ResourceBarrier(1, &back);
+        const UINT64 fence = CmdSubmit();
+        if (!fence || !AwaitMark(lfCore.timeline, fence, 10000)) return false;
+        BYTE *mapped = nullptr;
+        D3D12_RANGE range = { 0, static_cast<SIZE_T>(rb_desc.Width) };
+        if (FAILED(readback->Map(0, &range, reinterpret_cast<void **>(&mapped)))) return false;
+        for (UINT y = 0; y < H; ++y)
+            memcpy(out.data() + static_cast<size_t>(y) * W * 4, mapped + static_cast<size_t>(y) * pipe.picture.layout.Footprint.RowPitch, static_cast<size_t>(W) * 4);
+        D3D12_RANGE empty = { 0, 0 };
+        readback->Unmap(0, &empty);
+        return true;
+    };
+
+    auto diff_stats = [&](const std::vector<BYTE> &a, const std::vector<BYTE> &b, double &mean_abs, double &pct_changed, int &max_abs) {
+        double sum = 0.0;
+        size_t changed = 0;
+        max_abs = 0;
+        const size_t pixels = static_cast<size_t>(W) * H;
+        for (size_t i = 0; i < pixels; ++i)
+        {
+            const int dr = abs(int(a[i * 4 + 0]) - int(b[i * 4 + 0]));
+            const int dg = abs(int(a[i * 4 + 1]) - int(b[i * 4 + 1]));
+            const int db = abs(int(a[i * 4 + 2]) - int(b[i * 4 + 2]));
+            const int m = std::max(dr, std::max(dg, db));
+            if (m > max_abs) max_abs = m;
+            if (m > 0) ++changed;
+            sum += (dr + dg + db) / 3.0;
+        }
+        mean_abs = sum / static_cast<double>(pixels);
+        pct_changed = 100.0 * static_cast<double>(changed) / static_cast<double>(pixels);
+    };
+
+    std::vector<BYTE> src, out1, out2, restored;
+    const ULONGLONG t_run0 = GetTickCount64();
+    double dlss5_gpu_ms = 0.0;
+    LARGE_INTEGER fq = {};
+    QueryPerformanceFrequency(&fq);
+    for (int f = 0; f < 15; ++f)
+    {
+        fill_pattern(src, f);
+        if (!StagedFill(pipe.picture, src.data(), W * 4, H) || !CmdOpen()) { printf("FAIL: upload %d\n", f); return 2; }
+        D3D12_RESOURCE_BARRIER b_in = Barrier(pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        lfCore.cmd->ResourceBarrier(1, &b_in);
+        StagedCopy(lfCore.cmd, pipe.picture);
+        D3D12_RESOURCE_BARRIER b_out = Barrier(pipe.picture.gpu_tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        lfCore.cmd->ResourceBarrier(1, &b_out);
+        const UINT64 fence = CmdSubmit();
+        if (!fence || !AwaitMark(lfCore.timeline, fence, 10000)) { printf("FAIL: upload fence %d\n", f); return 2; }
+        LARGE_INTEGER qt0 = {}, qt1 = {};
+        QueryPerformanceCounter(&qt0);
+        if (!Dlss5Run(pipe, f == 0, false)) { printf("FAIL: Dlss5Run frame %d\n", f); return 2; }
+        QueryPerformanceCounter(&qt1);
+        if (f > 0) dlss5_gpu_ms += double(qt1.QuadPart - qt0.QuadPart) * 1000.0 / double(fq.QuadPart);
+    }
+    const ULONGLONG run_ms = GetTickCount64() - t_run0;
+    if (!read_picture(out1)) { printf("FAIL: readback 1\n"); return 2; }
+    double mean1 = 0.0, pct1 = 0.0; int max1 = 0;
+    diff_stats(src, out1, mean1, pct1, max1);
+
+    // Static re-evaluation via source_copy with tweaked sliders (Intensity 220%, Warm +50).
+    smOpt.dlss5_intensity = 220;
+    smOpt.dlss5_warm = 50;
+    if (!Dlss5HasSourceCopy() || !Dlss5Run(pipe, false, true) || !read_picture(out2)) { printf("FAIL: slider re-eval\n"); return 3; }
+    double mean2 = 0.0, pct2 = 0.0, delta12 = 0.0, pct12 = 0.0; int max2 = 0, max12 = 0;
+    diff_stats(src, out2, mean2, pct2, max2);
+    diff_stats(out1, out2, delta12, pct12, max12);
+
+    // Raw source restore verification.
+    if (!Dlss5RestoreSource(pipe) || !read_picture(restored)) { printf("FAIL: restore\n"); return 3; }
+    double mean_r = 0.0, pct_r = 0.0; int max_r = 0;
+    diff_stats(src, restored, mean_r, pct_r, max_r);
+
+    // Verify Off -> On toggle (Dlss5Close -> Dlss5PrepareSession -> Dlss5Run) works in the same session.
+    Dlss5Close();
+    std::vector<BYTE> reopened;
+    double mean_reopen = 0.0, pct_reopen = 0.0; int max_reopen = 0;
+    const bool reopen_ok = Dlss5PrepareSession(W, H) && Dlss5Run(pipe, true, false) && read_picture(reopened);
+    if (reopen_ok) diff_stats(src, reopened, mean_reopen, pct_reopen, max_reopen);
+
+    readback->Release();
+    PipelineRelease(pipe);
+    Dlss5Close();
+    if (lfCore.ngx_ready) NgxShutdown();
+
+    printf("TEST_DLSS5 %ux%u scale=%d%% model=%d warm_ms=%llu run15_ms=%llu steady_eval_ms=%.2f mean_diff=%.3f pct=%.2f max=%d | redo_mean=%.3f delta_vs_p1=%.3f pct12=%.2f | restore_max=%d | reopen=%s(%.3f)\n",
+           W, H, smOpt.dlss5_scale.load(), smOpt.dlss5_model.load(),
+           warm_ms, run_ms, dlss5_gpu_ms / 14.0, mean1, pct1, max1, mean2, delta12, pct12, max_r,
+           reopen_ok ? "ok" : "fail", mean_reopen);
+    const bool ok = mean1 > 0.5 && pct1 > 10.0 && delta12 > 0.25 && max_r == 0 && reopen_ok && mean_reopen > 0.5;
+    printf(ok ? "PASS: DLSS 5 GPU test succeeded\n" : "FAIL: DLSS 5 GPU test did not meet thresholds\n");
+    return ok ? 0 : 4;
+}
 int wmain(int argc, wchar_t **argv)
 {
     {
@@ -204,12 +379,15 @@ int wmain(int argc, wchar_t **argv)
             SetProcessDPIAware();
     }
     bool read_stdin = true;
+    UINT test_dlss5_w = 0, test_dlss5_h = 0;
     const wchar_t *video = nullptr;      // --video <job file>: Super Video (sm_video.inl)
     for (int i = 1; i < argc; ++i)
     {
         if (wcscmp(argv[i], L"--config") == 0 && i + 1 < argc) ReadStartFile(argv[++i]);
         else if (wcscmp(argv[i], L"--verbose") == 0) g_trace_echo = true;
         else if (wcscmp(argv[i], L"--no-stdin") == 0) read_stdin = false;
+        else if (wcscmp(argv[i], L"--test-dlss5") == 0) { test_dlss5_w = 1920; test_dlss5_h = 1080; }
+        else if (wcscmp(argv[i], L"--test-dlss5-1440") == 0) { test_dlss5_w = 2560; test_dlss5_h = 1440; }
         else if (wcscmp(argv[i], L"--video") == 0 && i + 1 < argc) { video = argv[++i]; ReadStartFile(video); }
         else if (wcscmp(argv[i], L"--cards") == 0) { CardsTell(); return 0; }      // for the app's "Preferred GPU" (lf_gpu_core.inl)
         else if (wcscmp(argv[i], L"--vrr") == 0) { VrrTell(); return 0; }          // for the app's VRR switch (lf_vrr.inl)
@@ -276,6 +454,7 @@ int wmain(int argc, wchar_t **argv)
         if (auto slash = wcsrchr(directory, L'\\')) *(slash + 1) = 0;
         if (!FgPrepareCompatibility(directory, true)) g_fg.failed = true;
     }
+    if (test_dlss5_w > 0 && test_dlss5_h > 0) return TestDlss5(test_dlss5_w, test_dlss5_h);
     if (!ControlStart(read_stdin))
     {
         Status("@error busy Another engine is still running");
@@ -287,11 +466,14 @@ int wmain(int argc, wchar_t **argv)
     // (XeSS MFG: Intel's libraries and the unlock plugin instead - the plugin needs a second before the library is used.)
     // (MSM FG: nothing of anyone else's to start - its passes are among the shaders compiling above.)
     if (XeSelected()) { if (!XeStart()) g_fg.failed = true; }
-    else if (NgxSelected() && !NgxStart()) Trace("[card] NGX did not start - DLSS MFG is unavailable, the picture is shown as it is");
+    if ((NgxSelected() || Dlss5Wanted()) && !lfCore.ngx_ready && !NgxStart())
+        Trace("[card] NGX did not start - DLSS MFG / DLSS 5 is unavailable, the picture is shown as it is");
+    if (Dlss5Wanted()) Dlss5WarmupStart();
     const int code = EngineRun();
     cursorfx::Restore();      // (the pointer as it was: sm_cursor.inl)
     SpoutClose();
-    if (NgxSelected()) NgxShutdown();
+    Dlss5Close();
+    if (lfCore.ngx_ready) NgxShutdown();
     Status("@state stopped");
     Trace("[engine] ended with code %d", code);
     if (g_control.instance) { ReleaseMutex(g_control.instance); CloseHandle(g_control.instance); }
