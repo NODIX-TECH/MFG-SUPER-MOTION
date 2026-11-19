@@ -102,6 +102,8 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
     let mutable xboxCancel: Threading.CancellationTokenSource = null
     let menuRequested = Event<unit>()
     let backToGame = Event<unit>()
+    let streamEndedEvent = Event<unit>()
+    let mutable streamHwnd = 0UL
     let mutable streamQuality = (0, 0, 0, 0)      // (what the running stream was asked at)
     let notify (names: string list) = for n in names do this.Notify n
     let update f =
@@ -118,7 +120,9 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
         let t = text ()
         if line.StartsWith "@window " then
             match UInt64.TryParse(line.Substring 8) with
-            | true, hwnd -> startFg hwnd |> ignore
+            | true, hwnd ->
+                streamHwnd <- hwnd
+                startFg hwnd |> ignore
             | _ -> ()
         elif line = "@menu" then menuRequested.Trigger()
         elif line = "@connected" then
@@ -130,9 +134,12 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
         elif line.StartsWith "@quit " then say (line.Substring 6) false
     let streamEnded () =
         stopFg ()
+        WifiStreaming.disable ()
+        streamHwnd <- 0UL
         playing <- None
         playingText <- ""
         notify [ "IsPlaying"; "PlayingText"; "QualityChanged" ]
+        streamEndedEvent.Trigger()
     let rec fill (found: ConsoleInfo list) =
         consoles.Clear()
         let t = text ()
@@ -179,17 +186,22 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
                         tries <- tries + 1
                 post (fun () ->
                     entry.Say(t.ConsoleConnecting, true)
-                    let started =
-                        ConsolePlayer.stream linked options (fun line ->
-                            post (fun () -> onStreamLine entry.Name (fun s w -> entry.Say(s, w)) line))
-                    started.Exited.Add(fun _ ->
-                        post (fun () ->
-                            if entry.IsBusy then entry.Say("", false)
-                            streamEnded ()))
-                    playing <- Some { Tell = ConsolePlayer.tell started; Front = (fun () -> ConsolePlayer.front started)
-                                      Stop = (fun () -> ConsolePlayer.tell started "quit"); Xbox = false }
-                    streamQuality <- (options.Resolution, options.Fps, options.Bitrate, options.Codec)
-                    notify [ "IsPlaying"; "PlayingText"; "QualityChanged" ])
+                    WifiStreaming.enable ()
+                    try
+                        let started =
+                            ConsolePlayer.stream linked options (fun line ->
+                                post (fun () -> onStreamLine entry.Name (fun s w -> entry.Say(s, w)) line))
+                        started.Exited.Add(fun _ ->
+                            post (fun () ->
+                                if entry.IsBusy then entry.Say("", false)
+                                streamEnded ()))
+                        playing <- Some { Tell = ConsolePlayer.tell started; Front = (fun () -> ConsolePlayer.front started)
+                                          Stop = (fun () -> ConsolePlayer.tell started "quit"); Xbox = false }
+                        streamQuality <- (options.Resolution, options.Fps, options.Bitrate, options.Codec)
+                        notify [ "IsPlaying"; "PlayingText"; "QualityChanged" ]
+                    with ex ->
+                        WifiStreaming.disable ()
+                        entry.Say(ex.Message, false))
             } |> ignore
     let searchCommand =
         AsyncRelayCommand(fun () ->
@@ -251,17 +263,22 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
         elif not (Edge.isThere ()) then entry.Say(t.ConsoleXboxEdgeMissing, false)
         else
             entry.Say(t.ConsoleConnecting, true)
-            let session =
-                XboxPlayer.play entry.Console (min 1 options.Resolution) options.Bitrate (fun line ->
-                    post (fun () -> onStreamLine entry.Name (fun s w -> entry.Say(s, w)) line))
-            XboxPlayer.watchPad session
-            session.Ended.ContinueWith(fun (_: Threading.Tasks.Task) ->
-                post (fun () ->
-                    if entry.IsBusy then entry.Say("", false)
-                    streamEnded ())) |> ignore
-            playing <- Some { Tell = session.Tell; Front = session.Front; Stop = session.Close; Xbox = true }
-            streamQuality <- (options.Resolution, options.Fps, options.Bitrate, options.Codec)
-            notify [ "IsPlaying"; "PlayingText"; "QualityChanged" ]
+            WifiStreaming.enable ()
+            try
+                let session =
+                    XboxPlayer.play entry.Console (min 1 options.Resolution) options.Bitrate (fun line ->
+                        post (fun () -> onStreamLine entry.Name (fun s w -> entry.Say(s, w)) line))
+                XboxPlayer.watchPad session
+                session.Ended.ContinueWith(fun (_: Threading.Tasks.Task) ->
+                    post (fun () ->
+                        if entry.IsBusy then entry.Say("", false)
+                        streamEnded ())) |> ignore
+                playing <- Some { Tell = session.Tell; Front = session.Front; Stop = session.Close; Xbox = true }
+                streamQuality <- (options.Resolution, options.Fps, options.Bitrate, options.Codec)
+                notify [ "IsPlaying"; "PlayingText"; "QualityChanged" ]
+            with ex ->
+                WifiStreaming.disable ()
+                entry.Say(ex.Message, false)
     let xboxSearchCommand =
         AsyncRelayCommand(fun () ->
             (task {
@@ -369,6 +386,8 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
     // Playing now.
     member _.IsPlaying = playing.IsSome
     member _.PlayingText = playingText
+    member _.StreamWindowHandle = streamHwnd
+    member _.RestartFg() = if playing.IsSome && streamHwnd <> 0UL then startFg streamHwnd |> ignore
     member _.StopCommand = stopCommand
     member _.MenuHelp = let t = text () in if options.Platform = 1 then t.ConsoleXboxMenuHelp else t.ConsoleMenuHelp
     // Xbox.
@@ -395,12 +414,13 @@ type ConsoleLinkModel(text: unit -> UiText, post: (unit -> unit) -> unit, initia
     member _.QualityChanged = playing.IsSome && streamQuality <> (options.Resolution, options.Fps, options.Bitrate, options.Codec)
     [<CLIEvent>] member _.MenuRequested = menuRequested.Publish
     [<CLIEvent>] member _.BackToGame = backToGame.Publish
+    [<CLIEvent>] member _.StreamEnded = streamEndedEvent.Publish
     // The stream's settings.
-    // (An Xbox streams 720p or 1080p.)
-    member _.Resolutions = if options.Platform = 1 then [| "720p"; "1080p" |] else [| "720p"; "1080p"; "1440p"; "4K" |]
+    // (PlayStation Remote Play and Xbox xHome both top out at 1080p.)
+    member _.Resolutions = [| "720p"; "1080p" |]
     member _.ResolutionIndex
-        with get () = if options.Platform = 1 then min 1 options.Resolution else options.Resolution
-        and set value = if value >= 0 then update (fun o -> { o with Resolution = value })
+        with get () = min 1 options.Resolution
+        and set value = if value >= 0 then update (fun o -> { o with Resolution = min 1 value })
     member _.FpsChoices = [| "30 FPS"; "60 FPS" |]
     member _.FpsIndex
         with get () = options.Fps

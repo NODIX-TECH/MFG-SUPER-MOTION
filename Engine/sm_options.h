@@ -91,6 +91,7 @@ struct Options
     std::atomic<int> gpu{-1};          // the card, -1 the first NVIDIA one
     std::atomic<unsigned long long> hwnd{0};   // a window named outright (tests): no countdown
     std::atomic<unsigned long> owner{0};       // the app's process: its windows are never the source
+    std::atomic<int> stream_dedup{0};          // Console Link: drop H.264/HEVC-noisy 30-in-60 duplicate stream frames (0 off for native PC games)
 };
 static Options smOpt;
 
@@ -173,7 +174,17 @@ static std::atomic<int> g_learn_flow{0};
 static std::atomic<bool> g_given_off{false};
 static double GivenFrameTime()
 {
+    if (smOpt.stream_dedup.load() != 0) return 0.0;
     if (g_given_off.load()) return 0.0;
+    const int fps = smOpt.game_fps.load();
+    return fps >= 20 && fps <= 500 ? 1.0 / fps : 0.0;
+}
+// Console Link max game FPS cap (e.g. 30 / 40 / 60): the game never exceeds this rate,
+// but may freely dip below it (e.g. 22..28 FPS in heavy scenes). Returns minimum real
+// frame period (1 / cap) in seconds, or 0.0 when Auto or in PC Mode.
+static double StreamMaxFrameTime()
+{
+    if (smOpt.stream_dedup.load() == 0) return 0.0;
     const int fps = smOpt.game_fps.load();
     return fps >= 20 && fps <= 500 ? 1.0 / fps : 0.0;
 }

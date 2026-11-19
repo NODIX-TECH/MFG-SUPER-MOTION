@@ -354,6 +354,30 @@ static int TestDlss5(UINT test_w, UINT test_h)
     printf(ok ? "PASS: DLSS 5 GPU test succeeded\n" : "FAIL: DLSS 5 GPU test did not meet thresholds\n");
     return ok ? 0 : 4;
 }
+static void EnableHighPerformancePriority()
+{
+    const HANDLE self = GetCurrentProcess();
+    const BOOL prioOk = SetPriorityClass(self, HIGH_PRIORITY_CLASS);
+    SetProcessPriorityBoost(self, FALSE); // FALSE = priority boost enabled
+    bool throttleOff = false;
+    if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll"))
+    {
+        using SetProcInfoFn = BOOL(WINAPI *)(HANDLE, int, LPVOID, DWORD);
+        if (auto fn = reinterpret_cast<SetProcInfoFn>(GetProcAddress(k32, "SetProcessInformation")))
+        {
+            struct PowerThrottlingState { ULONG Version; ULONG ControlMask; ULONG StateMask; };
+            // Separate calls: 0x1 (EXECUTION_SPEED) works on Win10+ and Win11;
+            // 0x4 (IGNORE_TIMER_RESOLUTION) works on Win11 22H2+ (no-op on Win10).
+            PowerThrottlingState execOff = { 1, 0x1, 0 };
+            if (fn(self, 4, &execOff, sizeof(execOff))) throttleOff = true;
+            PowerThrottlingState timerOff = { 1, 0x4, 0 };
+            fn(self, 4, &timerOff, sizeof(timerOff));
+        }
+    }
+    Trace("[priority] process priority %s, Windows power throttling %s",
+          prioOk ? "HIGH" : "unchanged", throttleOff ? "disabled" : "unchanged");
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     {
@@ -379,6 +403,7 @@ int wmain(int argc, wchar_t **argv)
             SetProcessDPIAware();
     }
     bool read_stdin = true;
+    int write_preset = -1;
     UINT test_dlss5_w = 0, test_dlss5_h = 0;
     const wchar_t *video = nullptr;      // --video <job file>: Super Video (sm_video.inl)
     for (int i = 1; i < argc; ++i)
@@ -389,6 +414,7 @@ int wmain(int argc, wchar_t **argv)
         else if (wcscmp(argv[i], L"--test-dlss5") == 0) { test_dlss5_w = 1920; test_dlss5_h = 1080; }
         else if (wcscmp(argv[i], L"--test-dlss5-1440") == 0) { test_dlss5_w = 2560; test_dlss5_h = 1440; }
         else if (wcscmp(argv[i], L"--video") == 0 && i + 1 < argc) { video = argv[++i]; ReadStartFile(video); }
+        else if (wcscmp(argv[i], L"--write-preset") == 0 && i + 1 < argc) write_preset = _wtoi(argv[++i]);
         else if (wcscmp(argv[i], L"--cards") == 0) { CardsTell(); return 0; }      // for the app's "Preferred GPU" (lf_gpu_core.inl)
         else if (wcscmp(argv[i], L"--vrr") == 0) { VrrTell(); return 0; }          // for the app's VRR switch (lf_vrr.inl)
         else if (wcscmp(argv[i], L"--rtss-quiet") == 0) { rtss::Quiet(); return 0; }
@@ -400,6 +426,7 @@ int wmain(int argc, wchar_t **argv)
             ApplyLine(line);
         }
     }
+    if (write_preset >= 0) { dlssgpreset::Apply(write_preset); return 0; }
     // The log only when it is asked for (log=1, the engine's own default; the app asks for it when the person
     // turns "Engine log" on): a player has no use for a file of a few megabytes an evening.
     // Super Video: a video file, not the screen - its own log (video.log), SMFG on the card picked, nothing else.
@@ -423,12 +450,35 @@ int wmain(int argc, wchar_t **argv)
     }
     g_generator_locked = true;
     Trace("MFG SUPER MOTION engine, built %s %s", __DATE__, __TIME__);
+    EnableHighPerformancePriority();
     SetUnhandledExceptionFilter(CrashFilter);
     SetConsoleCtrlHandler(ConsoleStop, TRUE);
     KeepChildrenWithUs();
     Status("@state starting");
     // DLSS MFG's preset into the driver's profile of the engine, before anything of the engine is on the card.
-    if (NgxSelected()) dlssgpreset::Apply(smOpt.dlssg_preset.load());
+    // Written by a second process of our own: the driver's profile session hands a hybrid laptop's screen to the
+    // generator's card (DXGI then lists it there and refuses to duplicate it), which would take the source away
+    // from Desktop Duplication. The profile is in the driver's database either way, and NGX reads it when it starts.
+    if (NgxSelected())
+    {
+        wchar_t self[MAX_PATH] = {};
+        if (GetModuleFileNameW(nullptr, self, MAX_PATH) != 0)
+        {
+            wchar_t command[MAX_PATH + 64];
+            swprintf_s(command, L"\"%ls\" --write-preset %d log=0", self, smOpt.dlssg_preset.load());
+            STARTUPINFOW start = { sizeof(start) };
+            PROCESS_INFORMATION process = {};
+            if (CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &start, &process))
+            {
+                WaitForSingleObject(process.hProcess, 10000);
+                CloseHandle(process.hThread);
+                CloseHandle(process.hProcess);
+                Trace("[dlssg] the preset went into the driver's profile of the engine (written by a process of its own)");
+            }
+            else
+                Trace("[dlssg] the preset's writer did not start (error %lu) - the driver's own preset is used", GetLastError());
+        }
+    }
     if (!GpuCoreStart())
     {
         Status("@error nogpu No compatible graphics card was found");

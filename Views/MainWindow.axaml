@@ -281,6 +281,11 @@
                   </ui:SettingRow>
                   <TextBlock Classes="muted" Text="{Binding ConsoleLink.BitrateLabel}" HorizontalAlignment="Right" FlowDirection="LeftToRight" />
                   <Button Classes="primary" HorizontalAlignment="Center" Content="{Binding Text.ConsoleApply}" Command="{Binding ConsoleLink.ApplyQualityCommand}" IsVisible="{Binding ConsoleLink.QualityChanged}" />
+                  <Border Height="1" Background="{DynamicResource LineBrush}" Margin="0,4" />
+                  <TextBlock Classes="card-label" Text="{Binding Text.GameFps}" ToolTip.Tip="{Binding Text.GameFpsHelp}" />
+                  <ListBox Name="ConsoleGameFpsBar" Classes="segmented" ItemsSource="{Binding ConsoleGameFpsChoices}" SelectedIndex="{Binding ConsoleGameFpsIndex, Mode=TwoWay}" ToolTip.Tip="{Binding Text.GameFpsHelp}" AutomationProperties.Name="{Binding Text.GameFps}">
+                    <ListBox.ItemTemplate><DataTemplate x:DataType="vm:ChoiceItem"><TextBlock Text="{Binding Label}" /></DataTemplate></ListBox.ItemTemplate>
+                  </ListBox>
                 </StackPanel>
               </Border>
             </ui:CardPair>

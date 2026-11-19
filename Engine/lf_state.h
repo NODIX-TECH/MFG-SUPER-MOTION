@@ -149,6 +149,14 @@ struct CaptureState
     UINT                    w = 0, h = 0;
     ID3D11Device           *d11 = nullptr;
     ID3D11DeviceContext    *d11_ctx = nullptr;
+    // The card the screen hangs on, where its frames are taken and copied
+    // (lf_desktop.inl: ScreenCaptureOpen). With one card it is d11 itself;
+    // on a laptop whose screen hangs on the processor's graphics it is a
+    // device of that card, and every frame crosses to the generator's.
+    ID3D11Device           *cap11 = nullptr;
+    ID3D11DeviceContext    *cap11_ctx = nullptr;
+    bool                    cross = false;        // the screen's card is not the generator's
+    bool                    bridge_cross = false; // the bridge in use was made for such a card
     IDXGIOutputDuplication *duplication = nullptr;
     ID3D11Texture2D        *bridge11 = nullptr;
     HANDLE                  bridge_handle = nullptr;

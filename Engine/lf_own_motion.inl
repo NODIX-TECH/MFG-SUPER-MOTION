@@ -25,22 +25,25 @@
 // g_luma_spread: the share of the picture the box around everything that
 // changed takes - a corner, when it was not the game that drew.
 static double g_luma_spread = 1.0;
+static double g_luma_strong = 1.0;
+static std::vector<BYTE> g_luma_last;
 static double LumaChangeNow()
 {
-    static std::vector<BYTE> last;
     g_luma_spread = 1.0;
+    g_luma_strong = 1.0;
     if (!lfLuma.mapped || !lfCap.luma_ok || lfLuma.view == nullptr || lfLuma.w == 0 || lfLuma.h == 0) return -1.0;
     const size_t n = static_cast<size_t>(lfLuma.w) * lfLuma.h;
-    if (last.size() != n)
+    if (g_luma_last.size() != n)
     {
-        last.assign(lfLuma.view, lfLuma.view + n);
+        g_luma_last.assign(lfLuma.view, lfLuma.view + n);
         return -1.0;           // the first frame is a reset anyway
     }
     uint64_t sum = 0;
+    uint64_t strong = 0;
     int left = static_cast<int>(lfLuma.w), right = -1, top = static_cast<int>(lfLuma.h), bottom = -1;
     for (UINT y = 0; y < lfLuma.h; ++y)
     {
-        const BYTE *now = lfLuma.view + static_cast<size_t>(y) * lfLuma.w, *before = last.data() + static_cast<size_t>(y) * lfLuma.w;
+        const BYTE *now = lfLuma.view + static_cast<size_t>(y) * lfLuma.w, *before = g_luma_last.data() + static_cast<size_t>(y) * lfLuma.w;
         if (memcmp(now, before, lfLuma.w) == 0) continue;
         if (static_cast<int>(y) < top) top = static_cast<int>(y);
         bottom = static_cast<int>(y);
@@ -48,14 +51,123 @@ static double LumaChangeNow()
         {
             const int d = int(now[x]) - int(before[x]);
             if (d == 0) continue;
-            sum += static_cast<uint64_t>(d < 0 ? -d : d);
+            const int ad = d < 0 ? -d : d;
+            sum += static_cast<uint64_t>(ad);
+            if (ad >= 3) ++strong;
             if (static_cast<int>(x) < left) left = static_cast<int>(x);
             if (static_cast<int>(x) > right) right = static_cast<int>(x);
         }
     }
-    memcpy(last.data(), lfLuma.view, n);
     g_luma_spread = right < 0 ? 0.0 : double(right - left + 1) * double(bottom - top + 1) / double(n);
+    g_luma_strong = double(strong) / double(n);
     return double(sum) / (255.0 * double(n));
+}
+
+static void LumaAcceptNow()
+{
+    if (!lfLuma.mapped || !lfCap.luma_ok || lfLuma.view == nullptr || lfLuma.w == 0 || lfLuma.h == 0) return;
+    const size_t n = static_cast<size_t>(lfLuma.w) * lfLuma.h;
+    g_luma_last.assign(lfLuma.view, lfLuma.view + n);
+}
+
+static struct StreamDedupState
+{
+    double last_real_change = 0.0;
+    double last_real_strong = 0.0;
+    double ema_real_change = 0.0;
+    double ema_real_strong = 0.0;
+    int cadence_hits = 0;
+    int dropped_since_real = 0;
+    bool told = false;
+} g_stream_dedup;
+
+static void StreamDedupReset()
+{
+    g_stream_dedup = StreamDedupState();
+}
+
+static void LumaResetHistory()
+{
+    g_luma_last.clear();
+    g_luma_spread = 1.0;
+    g_luma_strong = 1.0;
+    StreamDedupReset();
+}
+
+// Console Link (stream_dedup=1): H.264/HEVC 60 Hz video streams duplicate every 30 FPS
+// game frame with small compression/refinement noise (F1, F1', F2, F2', ...). Drop F1'
+// when it arrives early (< 25.5 ms after the last accepted real frame) and its luma diff
+// is pure compression residual, while passing true 60 FPS frames and >= 25.5 ms frames through
+// and never dropping two frames consecutively.
+static bool StreamRepeatNow(double stamp, double stamp_before, double change, double strong_share, double max_dt)
+{
+    if (change < 0.0) return false;
+    const double dt = (stamp_before > 0.0 && stamp > stamp_before) ? (stamp - stamp_before) : 1.0;
+    StreamDedupState &s = g_stream_dedup;
+    auto note_real = [&]() {
+        s.dropped_since_real = 0;
+        if (change > 0.0)
+        {
+            s.last_real_change = change;
+            s.last_real_strong = strong_share;
+            s.ema_real_change = s.ema_real_change > 0.0 ? s.ema_real_change + 0.35 * (change - s.ema_real_change) : change;
+            s.ema_real_strong = s.ema_real_strong > 0.0 ? s.ema_real_strong + 0.35 * (strong_share - s.ema_real_strong) : strong_share;
+        }
+    };
+
+    // Console Link max game FPS cap (e.g. <= 30 / 40 / 60): drop impossible above-cap duplicates
+    // AND compressed stream repeats during sub-cap dips (e.g. 24 FPS scenes sending a 3rd copy at 33 ms).
+    if (max_dt > 0.0)
+    {
+        const bool over_cap_dup = (s.dropped_since_real == 0 && dt < 0.76 * max_dt) ||
+                                  (s.dropped_since_real == 1 && dt < 0.55 * max_dt);
+        if (over_cap_dup) { ++s.dropped_since_real; return true; }
+        if (dt < 1.85 * max_dt && s.dropped_since_real < 2)
+        {
+            const double ref_change = std::max(s.last_real_change, s.ema_real_change);
+            const double ref_strong = std::max(s.last_real_strong, s.ema_real_strong);
+            const bool dip_dup = (change <= 0.0018 && strong_share <= 0.010) ||
+                                 (ref_change >= 0.0060 && change < 0.008 && strong_share < 0.05 &&
+                                  change < 0.14 * ref_change && strong_share < 0.16 * std::max(ref_strong, 0.020));
+            if (dip_dup) { ++s.dropped_since_real; return true; }
+        }
+        note_real();
+        return false;
+    }
+
+    constexpr double kEarlyCut = 0.0240; // covers 16.7 ms (60 Hz) duplicates + jitter without catching jittery 30 Hz real frames (~24-25 ms)
+    if (dt >= kEarlyCut)
+    {
+        note_real();
+        return false;
+    }
+
+    const double ref_change = std::max(s.last_real_change, s.ema_real_change);
+    const double ref_strong = std::max(s.last_real_strong, s.ema_real_strong);
+    const bool clearly_dup = (s.dropped_since_real == 0 && change <= 0.0012 && strong_share <= 0.005);
+    const bool alt_dup = (s.dropped_since_real == 0 && ref_change >= 0.0040 &&
+                          change < 0.012 && strong_share < 0.08 &&
+                          change < 0.30 * ref_change &&
+                          strong_share < 0.35 * std::max(ref_strong, 0.020));
+    const bool locked_dup = (s.dropped_since_real == 0 && s.cadence_hits >= 4 &&
+                             change <= 0.0028 && strong_share <= 0.016);
+    if (clearly_dup || alt_dup || locked_dup)
+    {
+        ++s.dropped_since_real;
+        s.cadence_hits = std::min(s.cadence_hits + 1, 30);
+        if (!s.told && s.cadence_hits >= 8)
+        {
+            s.told = true;
+            Trace("[stream] 30-in-60 compressed stream duplicates detected - locking to the game's real frames (change %.5f, strong %.3f)",
+                  change, strong_share);
+        }
+        return true;
+    }
+
+    // Real early motion (e.g. true 60 FPS game or 30->60 transition): unlock quickly.
+    if (dt < 0.0235) s.cadence_hits = std::max(0, s.cadence_hits - 3);
+    note_real();
+    return false;
 }
 
 // A frame of the desktop in which only a corner changed, while whole frames
@@ -164,6 +276,7 @@ static struct RepeatGuess
 // A desktop frame, before anything is done with it. True: let it go untouched.
 static bool RepeatExpected(double stamp)
 {
+    if (smOpt.stream_dedup.load() != 0) return false;
     RepeatGuess &g = g_repeat_guess;
     // Game FPS given: under half a frame of it after the game's last frame, nothing learnt.
     if (const double given = GivenFrameTime(); given > 0.0)

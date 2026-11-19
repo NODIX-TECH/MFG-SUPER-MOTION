@@ -69,7 +69,11 @@ struct FgPace
     // became slower stops being odd after a few pairs.
     bool Irregular(double span)
     {
-        const bool odd = usual > 0.0 && span > std::max(2.5 * usual, usual + 0.025);
+        const bool stream = smOpt.stream_dedup.load() != 0;
+        const double limit = stream
+            ? std::max(4.5 * usual, usual + 0.120)
+            : std::max(2.5 * usual, usual + 0.025);
+        const bool odd = usual > 0.0 && span > limit;
         usual = usual > 0.0 ? usual + (odd ? 0.04 : 0.12) * (span - usual) : span;
         return odd;
     }
@@ -87,16 +91,24 @@ struct FgPace
         // and a hitch of the game's is a hold shorter by that much (its 60 ms hitch 1.8 beats, ours 6 to 11). The
         // usual need, not the largest: the largest IS a late frame, and following it the delay rose and fell with
         // every one. SM_SMOOTH_BUFFER=<percent of a frame> (100).
+        const bool stream_dedup = smOpt.stream_dedup.load() != 0;
+        const double med = sorted[count / 2];
+        const double stream_target = stream_dedup
+            ? std::min(sorted[((count - 1) * 95) / 100] + 0.002, med + 0.025)
+            : 0.0;
         if (SmoothOn())
         {
             static const double share = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_SMOOTH_BUFFER", v, sizeof(v)) > 0 ? std::clamp(atoi(v), 10, 300) / 100.0 : 0.5; }();
             const double frame = usual > 0.0 ? usual : 4.0 * step;
-            return sorted[count / 2] + std::clamp(share * frame, 0.006, 0.025);
+            const double base = med + std::clamp(share * frame, 0.006, 0.025);
+            // Console Link over Wi-Fi WebRTC: cover 95th-percentile jitter bounded to median + 25 ms
+            // so Fixed/Smooth mode stays hitch-free without ratcheting latency to 80+ ms on one spike.
+            return stream_dedup ? std::max(base, stream_target) : base;
         }
         const unsigned queue = FgQueueTarget();
-        if (queue == 0) return sorted[count / 2];
-        if (queue == 1) return sorted[count - 1] + 0.0005;      // (round 88p: every pair of the last ones covered - see above)
-        return sorted[count - 1] + 0.5 * step;
+        if (queue == 0) return med;
+        if (queue == 1) return stream_dedup ? stream_target : sorted[count - 1] + 0.0005;      // (round 88p: every pair of the last ones covered - see above)
+        return stream_dedup ? std::max(stream_target + 0.004, med + 0.5 * step) : sorted[count - 1] + 0.5 * step;
     }
 
     // A pair was taken up. need: what its first frame in between asks of the
@@ -217,6 +229,7 @@ static void FgGateChoose(double hz, unsigned most_keep = 6)
     for (unsigned i = 0; i < g.filled; ++i) sum += g.deltas[i];
     g.every = sum / g.filled;
     if (GivenFrameTime() > 0.0) g.every = GivenFrameTime();     // Game FPS given in the app
+    if (const double min_every = StreamMaxFrameTime(); min_every > 0.0 && g.every < min_every) g.every = min_every;
     const double rate = 1.0 / g.every;
     unsigned keep = 1;
     while (keep < most_keep && rate / keep > hz * 1.04) ++keep;
@@ -435,10 +448,12 @@ static struct FgClock
             if (moment <= before) moment = stamp > before ? stamp : before + 0.001;
             return moment;
         }
+        const double min_every = StreamMaxFrameTime();
+        auto clamp_cap = [&](double e) { return (min_every > 0.0 && e < min_every) ? min_every : e; };
         spans[next] = span;
         next = (next + 1) % 8;
         if (filled < 8) ++filled;
-        if (every <= 0.0) { every = span; known = 1; moment = stamp; return moment; }
+        if (every <= 0.0) { every = clamp_cap(span); known = 1; moment = stamp; return moment; }
         const double grid = hz >= 24.0 ? 1.0 / hz : 0.0;
         // Another pace, and the frames agree on it: taken up at once. A game
         // whose frames are taken every second or every third (the engine's
@@ -470,7 +485,7 @@ static struct FgClock
             mean_side = side;
             if (mean_off >= 16 && mean > 0.0015 && mean < 0.25)
             {
-                every = mean;
+                every = clamp_cap(mean);
                 known = 8; off_beat = 0; mean_off = 0; median_off = 0; drift_run = 0;
                 moment = Bounded(stamp);
                 if (moment <= before) moment = before + 0.001;
@@ -497,7 +512,7 @@ static struct FgClock
             median_side = other ? side : 0;
             if (median_off >= 8)
             {
-                every = median;
+                every = clamp_cap(median);
                 known = 8;
                 off_beat = 0;
                 median_off = 0;
@@ -540,7 +555,7 @@ static struct FgClock
                 // change is the median of eight's, above.)
                 if (recent > 0.0015 && recent < 0.25 && std::fabs(recent - every) > 0.2 * every)
                 {
-                    every = recent;
+                    every = clamp_cap(recent);
                     known = 8; off_beat = 0; median_off = 0;
                     moment = Bounded(stamp);
                     if (moment <= before) moment = before + 0.001;
@@ -561,12 +576,16 @@ static struct FgClock
         // game slows down and speeds up"). On the beat the frame only comes later than its moment - what the delay
         // is there for - and the picture goes on evenly, as Lossless Scaling's does.
         static const double hold_given = [] { char v[8] = {}; return GetEnvironmentVariableA("SM_CLOCK_HOLD", v, sizeof(v)) > 0 ? atoi(v) / 100.0 : 0.0; }();
-        const double hold = hold_given > 0.0 ? hold_given : EvenOn() ? 1.0 : kClockHold;
-        if (off <= std::max(slack, hold * every) && -off <= std::max(slack, kClockHold * every))
+        const bool stream_dedup = smOpt.stream_dedup.load() != 0;
+        const double hold = hold_given > 0.0 ? hold_given : stream_dedup ? 1.25 : EvenOn() ? 1.0 : kClockHold;
+        const double neg_hold = stream_dedup ? 1.0 : kClockHold;
+        if (off <= std::max(slack, hold * every) && -off <= std::max(slack, neg_hold * every))
         {
             // On the beat: the pace follows the frames slowly, the clock the stamps - how fast, Trust says.
-            const double trust = Trust(span);
-            every += (known < 30 ? 0.1 : 0.03) * (span - every);
+            // Console Link streams run on hardware-locked 30/60 Hz console clocks behind Wi-Fi jitter:
+            // keep low gain so transport bursts never bend the output beat.
+            const double trust = stream_dedup ? std::min(Trust(span), 0.05) : Trust(span);
+            every = clamp_cap(every + (known < 30 ? 0.1 : 0.03) * (span - every));
             moment += every + (known < 30 ? 0.12 : trust) * off;
             if (known < 1000) ++known;
             off_beat = 0;
@@ -583,7 +602,7 @@ static struct FgClock
             double recent = 0.0;
             for (unsigned i = 0; i < filled; ++i) recent += spans[i];
             recent = filled >= 4 ? recent / filled : span;
-            every = recent > 0.0015 && recent < 0.25 ? recent : every;
+            every = clamp_cap(recent > 0.0015 && recent < 0.25 ? recent : every);
             known = 1; off_beat = 0;
             // (Round 91: onto the stamp only across a real break - more than three and a half frames off; else
             // within half and twice a beat of the frame before, Bounded.)

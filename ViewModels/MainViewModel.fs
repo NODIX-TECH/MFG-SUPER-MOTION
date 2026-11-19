@@ -141,6 +141,8 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
     let xessMotionSources = [| ChoiceItem("XeSS MFG"); ChoiceItem(""); ChoiceItem("NVIDIA Optical Flow") |]
     let msmSearches = [| ChoiceItem("SMFG"); ChoiceItem("") |]
     let gameFpsChoices = Preferences.gameFpsRates |> Array.map (fun r -> ChoiceItem(if r = 0 then "" else string r))
+    let consoleGameFpsRates = [| 0; 30; 40; 60 |]
+    let consoleGameFpsChoices = [| ChoiceItem(""); ChoiceItem("≤ 30 FPS"); ChoiceItem("≤ 40 FPS"); ChoiceItem("≤ 60 FPS") |]
     let dlssPresets = [| ChoiceItem(""); ChoiceItem(""); ChoiceItem(""); ChoiceItem("") |]
     // Performance (preset C) picked: the page shows why it is not advised.
     let presetCPicked = Event<unit>()
@@ -163,6 +165,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         xessMotionSources[1].Label <- text.GpuEstimate
         msmSearches[1].Label <- sprintf "SMFG · %s" text.Fast
         gameFpsChoices[0].Label <- text.GameAuto
+        consoleGameFpsChoices[0].Label <- text.GameAuto
         dlssPresets[0].Label <- text.PresetDriver; dlssPresets[1].Label <- text.PresetPerformance
         dlssPresets[2].Label <- text.PresetQuality; dlssPresets[3].Label <- text.PresetBalanced
         gameTypes[0].Label <- text.GameAuto; gameTypes[3].Label <- text.GameFirstPerson; gameTypes[4].Label <- text.GameThirdPerson
@@ -245,7 +248,7 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
         notifyLists ()
         notify [ "GeneratorName"; "IsDlss"; "IsXess"; "IsMsm"; "IsSmai"; "IsOwnGenerator"; "SpoutEnabled"; "IsOverSharpnessOpen"; "FrameGenerationEnabled"; "ModeIndex"; "IsCustomMultiplier"; "CustomMultiplier"; "FrameModeIndex"; "IsAdaptive"; "IsFixed"; "AdaptiveTarget"; "GameTypeIndex"; "IsFlowOpen"; "Flow"; "FlowLabel"; "UpscalerIndex"; "SmsrEnabled"; "SmsrStrength"; "SmsrStrengthLabel"; "IsSmsrOn"; "IsDlss5On"; "Dlss5DllReady"; "Dlss5DllLabel"; "Dlss5DllPath"; "Dlss5ModelIndex"; "Dlss5StyleIndex"; "Dlss5PassesIndex"; "Dlss5Scale"; "Dlss5ScaleLabel"; "Dlss5Intensity"; "Dlss5IntensityLabel"; "Dlss5Tone"; "Dlss5ToneLabel"; "Dlss5Structure"; "Dlss5StructureLabel"; "Dlss5Skin"; "Dlss5SkinLabel"; "Dlss5Denoise"; "Dlss5DenoiseLabel"; "Dlss5Edge"; "Dlss5EdgeLabel"; "Dlss5KeepColors"; "Dlss5KeepColorsLabel"; "Dlss5LowLight"; "Dlss5LowLightLabel"; "Dlss5Brightness"; "Dlss5BrightnessLabel"; "Dlss5Contrast"; "Dlss5ContrastLabel"; "Dlss5Saturation"; "Dlss5SaturationLabel"; "Dlss5Warmth"; "Dlss5WarmthLabel"; "IsSharpnessOpen"; "Sharpness"; "SharpnessLabel"; "Bloom"; "BloomLabel"; "IsBloomOn"; "BloomWide"; "BloomWideLabel"; "OverSharpness"; "OverSharpnessLabel"; "StretchEnabled"
                  "CaptureApiIndex"; "WindowModeIndex"; "CountdownSeconds"; "CountdownHint"; "QueueTargetIndex"
-                 "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "GameFpsText"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
+                 "FrameLimit"; "FrameLimitLabel"; "GameFpsIndex"; "ConsoleGameFpsIndex"; "GameFpsText"; "MultiDisplayEnabled"; "CropLeftText"; "CropTopText"; "CropRightText"; "CropBottomText"; "CursorClipEnabled"; "CursorSpeedEnabled"; "CursorHideEnabled"; "CursorScaleEnabled"; "LimitToScreenEnabled"; "VrrEnabled"; "SyncModeIndex"; "LowLatencyEnabled"; "HdrEnabled"; "GpuPriorityIndex"
                  "MotionSourceIndex"; "XessMotionSourceIndex"; "MsmSearchIndex"; "MsmAiEnabled"; "XessTensorEnabled"; "IsXessTensorShown"; "HudAiEnabled"; "DlssPresetIndex"; "AdaptiveLearningEnabled"; "AdaptiveFlowEnabled"; "IsAdaptiveFlowOpen"; "AmlGuideEnabled"; "LearningStatus"
                  "IsMotionPrecisionOpen"; "StillPixelsEnabled"; "EvenPacingEnabled"; "UltraSmoothEnabled"; "TriangleMeshEnabled"; "IsTriangleMeshShown"; "IsTriangleMeshOpen"; "TriPitchIndex"; "TriRoundsIndex"; "TriFineIndex"; "TriFullIndex"; "TriHomeIndex"; "TriRangeIndex"; "TriExactIndex"; "TriRelaxIndex"; "FpsCounterEnabled"; "FpsCounterModeIndex"; "FpsCounterSizeIndex"; "LockRefreshEnabled"; "StatusNote"; "HasStatusNote" ]
     let notifyEngine () = notify [ "IsMotionActive"; "IsMotionWaiting"; "IsMotionRunning"; "MotionButtonText"; "StatusText"; "HasStatus"; "StatusNote"; "HasStatusNote"; "LearningStatus" ]
@@ -327,13 +330,26 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             notify [ "IsDisplay"; "IsDisplayOrConsole"; "IsVideo"; "IsMods"; "IsMoreOpen"; "IsSupport"; "IsConsole"; "IsSettings"; "IsHelp"; "CanAttachLog"; "FeedbackLogNote"; "CurrentPage" ]
     let displayCommand = RelayCommand(fun () -> navigate "display")
     // Console Link (2026-11-16): its page and its own view model; its settings saved with the app's.
+    let mutable pendingConsoleHwnd = 0UL
+    let startConsoleFg (hwnd: uint64) =
+        if hwnd = 0UL then pendingConsoleHwnd <- 0UL; false
+        elif engine.IsActive then
+            pendingConsoleHwnd <- hwnd
+            engine.Stop()
+            true
+        else
+            pendingConsoleHwnd <- 0UL
+            engine.SetTexts(studyTexts ())
+            engine.StartOnWindow(selected.Options, hwnd)
+    let stopConsoleFg () =
+        pendingConsoleHwnd <- 0UL
+        if engine.IsActive then engine.Stop()
     let consoleCommand = RelayCommand(fun () -> navigate "console")
     // (Frame generation on the console's stream window is Super Motion as the profile has it - every technique; what is
     //  changed on its cards while it plays reaches the engine as for any game.)
     let consoleLink =
         new ConsoleLinkModel(text, post, consoleOptions, (fun o -> consoleOptions <- o; persist ()),
-                             (fun hwnd -> (if engine.IsActive then engine.Stop()); engine.StartOnWindow(selected.Options, hwnd)),
-                             (fun () -> if engine.IsActive then engine.Stop()))
+                             startConsoleFg, stopConsoleFg)
     let videoCommand = RelayCommand(fun () -> navigate "video")
     let modsCommand = RelayCommand(fun () -> navigate "mods")
     let moreCommand = RelayCommand(fun () ->
@@ -559,6 +575,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
                     if engineStatus.Phase = Idle && status.Phase <> Idle then monitorsFound <- findMonitors ()
                     engineStatus <- status
                     notifyEngine ()
+                    if status.Phase = Idle && pendingConsoleHwnd <> 0UL && not engine.IsActive then
+                        let hwnd = pendingConsoleHwnd
+                        pendingConsoleHwnd <- 0UL
+                        engine.SetTexts(studyTexts ())
+                        engine.StartOnWindow(selected.Options, hwnd) |> ignore
                     // (Linux: START MOTION installs the layer the first time.)
                     if isLinux then notifyLinux ()
                     if further && page = "settings" then refreshLearned ()))
@@ -718,6 +739,12 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             let ids = generatorIds selected.Options
             if not telling && value >= 0 && value < ids.Length && not engine.IsActive then
                 updateOptions (fun o -> { o with Generator = ids[value] })
+    member _.SetConsoleGenerator(index: int) =
+        let ids = generatorIds selected.Options
+        if index >= 0 && index < ids.Length && ids[index] <> selected.Options.Generator then
+            let live = consoleLink.IsPlaying && consoleLink.StreamWindowHandle <> 0UL
+            updateOptions (fun o -> { o with Generator = ids[index] })
+            if live then consoleLink.RestartFg()
     member _.TransparencyEnabled
         with get () = transparency
         and set value =
@@ -930,6 +957,11 @@ type MainViewModel(store: StateStore, startupRegistration: IStartupRegistration)
             else Preferences.gameFpsRates |> Array.mapi (fun i r -> i, abs (r - value)) |> Array.filter (fun (i, _) -> i > 0) |> Array.minBy snd |> fst
         and set value =
             if value >= 0 && value < Preferences.gameFpsRates.Length then updateOptions (fun o -> { o with GameFps = Preferences.gameFpsRates[value] })
+    member _.ConsoleGameFpsChoices = consoleGameFpsChoices
+    member _.ConsoleGameFpsIndex
+        with get () = Array.IndexOf(consoleGameFpsRates, selected.Options.GameFps)
+        and set value =
+            if value >= 0 && value < consoleGameFpsRates.Length then updateOptions (fun o -> { o with GameFps = consoleGameFpsRates[value] })
     // Round 43, as Lossless Scaling has them: multi-display mode, Crop input (pixels left out on each side; a box
     // that holds anything but a number is left as it was) and the pointer.
     member _.MultiDisplayEnabled

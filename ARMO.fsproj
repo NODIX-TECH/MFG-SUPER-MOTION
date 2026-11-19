@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\armo.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <Company>NODIX TECH</Company>
     <RootNamespace>Mfg_Super_Motion</RootNamespace>
     <Authors>NODIX TECH</Authors>
@@ -154,6 +154,7 @@
     <Compile Include="ViewModels\MainViewModel.fs" />
     <Compile Include="Controls\SettingRow.fs" />
     <Compile Include="Controls\GroupFlow.fs" />
+    <Compile Include="Views\ConsoleQuickMenu.fs" />
     <Compile Include="Views\MainWindow.axaml.fs" />
     <Compile Include="Views\ModHost.fs" />
     <Compile Include="Views\TrayController.fs" />

@@ -63,43 +63,206 @@ static HMONITOR MonitorByName(const wchar_t *name)
     return search.found;
 }
 
-// The output of the card that shows the wanted screen: the one the loop
-// picked (g_desk_monitor), or for a moment the one a window fills
-// (g_capture_target_monitor, WindowDxgiStart). When the screen hangs on
-// another card, or WGC is picked in the app for a whole screen, *elsewhere
-// gets it instead and the caller reads it through Graphics Capture.
+// The output of whichever card shows the wanted screen, and that card. On a
+// laptop the screen usually hangs on the processor's graphics while the
+// generator's card drives none at all: Desktop Duplication can only be opened
+// on the card that drives the screen, so the source is taken there and its
+// frames carried over to the generator's card (ScreenCross, BridgeFrame).
 static HMONITOR g_capture_target_monitor = nullptr;
 static HMONITOR g_desk_monitor = nullptr;
-static IDXGIOutput *FindCaptureOutput(IDXGIAdapter1 *card, HMONITOR *elsewhere)
+
+// 1.1.0 (GitHub 87, the community's Windows 10 fix - merged here instead of patching this file's bytes): before build
+// 20348 Graphics Capture cannot leave out its yellow border (IsBorderRequired is not there), and its frames come on a
+// 40 / 60 ms beat of its own. There a window that is not its whole screen - windowed, or scaled onto it - is taken by
+// DXGI cut down to the window's client area instead. Only from build 19041 on (Windows 10 2004): before it the output
+// window cannot be left out of the screen's copy (WDA_EXCLUDEFROMCAPTURE), and the engine would take its own frames.
+// Windows 11 keeps Graphics Capture for such a window (round 31: it hands over the window's own frames only).
+// SM_WIN10_CROP=1 / 0: as if on such a Windows / not (tests).
+static DWORD WindowsBuild()
 {
-    const HMONITOR target = g_capture_target_monitor ? g_capture_target_monitor : g_desk_monitor;
-    if (target) {
-        if (!g_capture_target_monitor && elsewhere && smOpt.capture_api.load() == 1) {
-            Trace("[desk] WGC picked: the screen goes through Windows Graphics Capture");
-            *elsewhere = target;
-            return nullptr;
-        }
-        for (UINT i = 0; ; ++i) {
-            IDXGIOutput *output = nullptr;
-            if (FAILED(card->EnumOutputs(i, &output))) break;
-            DXGI_OUTPUT_DESC desc = {}; output->GetDesc(&desc);
-            if (desc.Monitor == target) return output;
-            output->Release();
-        }
-        if (elsewhere) {
-            if (!g_capture_target_monitor)
-                Trace("[desk] that screen hangs on another card - taking it through Windows Graphics Capture");
-            *elsewhere = target;
-        }
-        return nullptr;
+    static const DWORD build = [] {
+        typedef LONG (WINAPI *RtlGetVersionFn)(OSVERSIONINFOW *);
+        OSVERSIONINFOW v = {};
+        v.dwOSVersionInfoSize = sizeof(v);
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        const auto get = ntdll ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion")) : nullptr;
+        return get && get(&v) == 0 ? v.dwBuildNumber : DWORD(0);
+    }();
+    return build;
+}
+static bool Win10Crop()
+{
+    static const bool crop = [] {
+        char forced[4] = {};
+        if (GetEnvironmentVariableA("SM_WIN10_CROP", forced, sizeof(forced)) > 0) return forced[0] == '1';
+        const DWORD build = WindowsBuild();
+        return build >= 19041 && build < 20348;
+    }();
+    static bool told = false;
+    if (crop && !told)
+    {
+        told = true;
+        Trace("[capture] Windows build %lu cannot leave out Graphics Capture's yellow border - DXGI is used for every "
+              "source here, whatever the app's Capture API says", WindowsBuild());
     }
-    IDXGIOutput *output = nullptr;
-    if (FAILED(card->EnumOutputs(0, &output))) return nullptr;
-    return output;
+    return crop;
 }
 
-// Start taking the desktop at w x hgt: duplication of the picked screen, in
-// half float when that screen is in HDR.
+// Is a whole screen taken with Graphics Capture (the app's "WGC" choice)?
+// Only where Windows can leave its border out: the yellow frame around the game
+// is the one thing about a source nobody asks for. On Windows 10 it cannot be
+// left out at all, so there DXGI is what every screen source gets, whatever the
+// app's Capture API says (and a window that is not its whole screen too -
+// WindowStart, Win10Crop).
+static bool WgcForScreen()
+{
+    return smOpt.capture_api.load() == 1 && !Win10Crop();
+}
+
+// The device every captured frame is copied on: the card the screen hangs on
+// (cap11, ScreenCaptureOpen). A source from Graphics Capture hands its
+// frames over on the generator's own device instead (lfCap.d11).
+static ID3D11Device *CopyDevice() { return lfCap.cap11 != nullptr ? lfCap.cap11 : lfCap.d11; }
+static ID3D11DeviceContext *CopyContext() { return lfCap.cap11_ctx != nullptr ? lfCap.cap11_ctx : lfCap.d11_ctx; }
+
+// Open the screen's duplication on whichever card can give it. A hybrid
+// laptop's discrete card often lists the screen too and refuses to duplicate it
+// (the processor's graphics is what scans it out), so every card that lists the
+// screen is tried in turn and the first that hands frames over is kept. When
+// that card is not the generator's, its frames cross in BridgeFrame.
+static bool ScreenCaptureOpen(HMONITOR target)
+{
+    IDXGIFactory1 *factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&factory)) || factory == nullptr)
+    { Trace("[desk] no DXGI factory"); return false; }
+    const LUID ours = lfCore.device->GetAdapterLuid();
+    const bool hdr = lfCap.display.hdr_on;
+    bool opened = false;
+    for (UINT i = 0; !opened; ++i)
+    {
+        IDXGIAdapter1 *card = nullptr;
+        if (factory->EnumAdapters1(i, &card) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 card_desc = {};
+        card->GetDesc1(&card_desc);
+        const bool same = card_desc.AdapterLuid.LowPart == ours.LowPart &&
+                          card_desc.AdapterLuid.HighPart == ours.HighPart;
+        for (UINT o = 0; !opened; ++o)
+        {
+            IDXGIOutput *output = nullptr;
+            if (FAILED(card->EnumOutputs(o, &output)) || output == nullptr) break;
+            DXGI_OUTPUT_DESC desc = {};
+            if (FAILED(output->GetDesc(&desc)) || (target != nullptr && desc.Monitor != target))
+            { output->Release(); continue; }
+
+            ID3D11Device *device = nullptr;
+            ID3D11DeviceContext *context = nullptr;
+            if (same)
+            {
+                device = lfCap.d11; device->AddRef();
+                context = lfCap.d11_ctx; context->AddRef();
+            }
+            else
+            {
+                D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+                const HRESULT made = D3D11CreateDevice(card, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1, D3D11_SDK_VERSION,
+                                                       &device, nullptr, &context);
+                if (FAILED(made) || device == nullptr || context == nullptr)
+                {
+                    Trace("[desk] %ls gave no Direct3D 11 device (0x%08X) - trying the next card",
+                          card_desc.Description, (unsigned)made);
+                    if (context) context->Release();
+                    if (device) device->Release();
+                    output->Release();
+                    continue;
+                }
+            }
+
+            IDXGIOutput1 *output1 = nullptr;
+            IDXGIOutput5 *output5 = nullptr;
+            output->QueryInterface(__uuidof(IDXGIOutput1), (void **)&output1);
+            if (hdr) output->QueryInterface(__uuidof(IDXGIOutput5), (void **)&output5);
+            HRESULT status = E_FAIL;
+            if (hdr && output5 != nullptr)
+            {
+                const DXGI_FORMAT formats[] = {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM};
+                status = output5->DuplicateOutput1(device, 0, _countof(formats), formats, &lfCap.duplication);
+                if (FAILED(status))
+                    Trace("[hdr] half-float duplication refused on %ls (0x%08X) - taking the screen in SDR",
+                          card_desc.Description, (unsigned)status);
+            }
+            else if (hdr)
+                Trace("[hdr] IDXGIOutput5 is missing on this Windows - taking the screen in SDR");
+            if (output1 != nullptr && (FAILED(status) || lfCap.duplication == nullptr))
+                status = output1->DuplicateOutput(device, &lfCap.duplication);
+
+            if (SUCCEEDED(status) && lfCap.duplication != nullptr)
+            {
+                IDXGIOutput6 *out6 = nullptr;
+                if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6), (void **)&out6)) && out6 != nullptr)
+                {
+                    DXGI_OUTPUT_DESC1 d1 = {};
+                    if (SUCCEEDED(out6->GetDesc1(&d1)))
+                    {
+                        const bool hdr_cs =
+                            d1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
+                            d1.ColorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 ||
+                            d1.ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 ||
+                            d1.ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
+
+                        Trace("[desk] screen colour space %d at %u bits%s",
+                            (int)d1.ColorSpace, d1.BitsPerColor,
+                            hdr_cs ? " - this screen is in HDR" : "");
+                    }
+                    out6->Release();
+                }
+                if (output5) output5->Release();
+                if (output1) output1->Release();
+                output->Release();
+
+                lfCap.cap11 = device; lfCap.cap11_ctx = context;
+                lfCap.cross = !same;
+                lfCap.monitor = desc.Monitor;
+                lfCap.opened_hdr = hdr;
+                if (!same)
+                    Trace("[desk] the screen hangs on %ls, not on the generator's card: its frames are taken there and carried over",
+                          card_desc.Description);
+                else
+                    Trace("[desk] the screen is on the generator's card");
+                opened = true;
+            }
+            else
+            {
+                if (output5) output5->Release();
+                if (output1) output1->Release();
+                output->Release();
+                Trace("[desk] %ls lists this screen but cannot duplicate it (0x%08X) - trying the next card",
+                      card_desc.Description, (unsigned)status);
+                lfCap.duplication = nullptr;
+                context->Release();
+                device->Release();
+            }
+        }
+        card->Release();
+    }
+    factory->Release();
+    return opened;
+}
+
+// Let a screen-card device go (Graphics Capture takes its frames on the
+// generator's own instead).
+static void ScreenCaptureRelease()
+{
+    if (lfCap.cap11_ctx) { lfCap.cap11_ctx->Release(); lfCap.cap11_ctx = nullptr; }
+    if (lfCap.cap11) { lfCap.cap11->Release(); lfCap.cap11 = nullptr; }
+    lfCap.cross = false;
+}
+
+static void ScreenCrossStop();
+
+// Start taking the desktop at w x hgt: duplication of the picked screen on the
+// card that drives it, in half float when that screen is in HDR. When that card
+// is not the generator's, every frame crosses to it in BridgeFrame.
 static bool DeskStart(UINT w, UINT hgt)
 {
     WindowStop();
@@ -108,70 +271,26 @@ static bool DeskStart(UINT w, UINT hgt)
     if (w == 0 || hgt == 0) { Trace("[desk] desktop source stopped"); return true; }
     if (!SwizzleReady()) return false;
     if (!CaptureDeviceReady()) return false;
-    IDXGIFactory1 *dxgi_factory = nullptr;
-    HRESULT status = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&dxgi_factory);
-    if (FAILED(status)) { Trace("[desk] no DXGI factory (0x%08X)", status); return false; }
 
-    const int want_dda = CardInUse();
-    IDXGIAdapter1 *card = nullptr;
-    if (FAILED(dxgi_factory->EnumAdapters1(want_dda >= 0 ? (UINT)want_dda : 0, &card)))
-    { Trace("[desk] card %d is not there", want_dda >= 0 ? want_dda : 0); dxgi_factory->Release(); return false; }
-    HMONITOR elsewhere = nullptr;
-    IDXGIOutput *output = FindCaptureOutput(card, &elsewhere);
-    if (output == nullptr && elsewhere != nullptr)
+    const HMONITOR target = g_capture_target_monitor ? g_capture_target_monitor
+                            : g_desk_monitor ? g_desk_monitor
+                            : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    lfCap.display = HdrDisplayOf(target);
+    // (WGC for a whole screen: only where Windows can leave its border out.)
+    if (!g_capture_target_monitor && WgcForScreen())
     {
-        card->Release(); dxgi_factory->Release();
-        return ScreenViaWgcStart(elsewhere);
+        Trace("[desk] WGC picked: the screen goes through Windows Graphics Capture");
+        return ScreenViaWgcStart(target);
     }
-    if (output == nullptr) { Trace("[desk] this card has no screen to duplicate"); card->Release(); dxgi_factory->Release(); return false; }
-
+    if (!ScreenCaptureOpen(target))
     {
-        IDXGIOutput6 *out6 = nullptr;
-        if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6), (void **)&out6)))
-        {
-            DXGI_OUTPUT_DESC1 d1 = {};
-            if (SUCCEEDED(out6->GetDesc1(&d1)))
-            {
-                const bool hdr =
-                    d1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
-                    d1.ColorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 ||
-                    d1.ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 ||
-                    d1.ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020;
-
-                Trace("[desk] screen colour space %d at %u bits%s",
-                    (int)d1.ColorSpace, d1.BitsPerColor,
-                    hdr ? " - this screen is in HDR" : "");
-            }
-            out6->Release();
-        }
+        // No card here can duplicate the screen. Graphics Capture is the only way
+        // left: a picture with Windows' border around it is better than none.
+        Trace("[desk] no card here can duplicate this screen - taking it through Windows Graphics Capture%s",
+              Win10Crop() ? " (on Windows 10 that keeps its yellow border)" : "");
+        ScreenCaptureRelease();
+        return ScreenViaWgcStart(target);
     }
-    IDXGIOutput1 *output1 = nullptr;
-    if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput1), (void **)&output1)))
-    { Trace("[desk] IDXGIOutput1 is missing"); output->Release(); card->Release(); dxgi_factory->Release(); return false; }
-    DXGI_OUTPUT_DESC output_desc = {};
-    output->GetDesc(&output_desc);
-    lfCap.monitor = output_desc.Monitor;
-    lfCap.display = HdrDisplayOf(lfCap.monitor);
-
-    lfCap.opened_hdr = lfCap.display.hdr_on;
-    IDXGIOutput5 *output5 = nullptr;
-    status = E_FAIL;
-    if (lfCap.opened_hdr && SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput5), (void **)&output5)))
-    {
-        const DXGI_FORMAT formats[] = {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM};
-        status = output5->DuplicateOutput1(lfCap.d11, 0, _countof(formats), formats, &lfCap.duplication);
-        output5->Release();
-        if (FAILED(status))
-            Trace("[hdr] half-float duplication refused (0x%08X) - taking the screen in SDR", status);
-    }
-    else if (lfCap.opened_hdr)
-        Trace("[hdr] IDXGIOutput5 is missing on this Windows - taking the screen in SDR");
-    if (FAILED(status))
-    {
-        status = output1->DuplicateOutput(lfCap.d11, &lfCap.duplication);
-    }
-    output1->Release(); output->Release(); card->Release(); dxgi_factory->Release();
-    if (FAILED(status)) { Trace("[desk] duplication refused (0x%08X)", status); return false; }
 
     {
         DXGI_OUTDUPL_DESC dd = {};
@@ -189,7 +308,7 @@ static bool DeskStart(UINT w, UINT hgt)
                         : "");
     }
     lfCap.w = w; lfCap.h = hgt; lfCap.live = true;
-    Trace("[desk] taking the desktop at %ux%u", w, hgt);
+    Trace("[desk] taking the desktop at %ux%u%s", w, hgt, lfCap.cross ? " (DXGI on the screen's card)" : "");
     return true;
 }
 
@@ -208,10 +327,13 @@ static void DeskStop()
     lfHdr.float_frames = false;
     HdrRelease();
     Luma11Stop();
+    ScreenCrossStop();
     if (lfCap.bridge12) { lfCap.bridge12->Release(); lfCap.bridge12 = nullptr; }
     if (lfCap.bridge_handle)  { CloseHandle(lfCap.bridge_handle); lfCap.bridge_handle = nullptr; }
     if (lfCap.bridge11) { lfCap.bridge11->Release(); lfCap.bridge11 = nullptr; }
+    lfCap.bridge_cross = false;
     if (lfCap.duplication) { lfCap.duplication->Release(); lfCap.duplication = nullptr; }
+    ScreenCaptureRelease();
     if (lfCap.d11_ctx) { lfCap.d11_ctx->Release(); lfCap.d11_ctx = nullptr; }
     if (lfCap.d11) { lfCap.d11->Release(); lfCap.d11 = nullptr; }
     if (lfCap.sync12) { lfCap.sync12->Release(); lfCap.sync12 = nullptr; }
@@ -429,42 +551,6 @@ static bool WindowClientOnMonitor(HWND hwnd, RECT &crop, HMONITOR &monitor)
     return crop.left >= 0 && crop.top >= 0 &&
         crop.right <= mi.rcMonitor.right - mi.rcMonitor.left &&
         crop.bottom <= mi.rcMonitor.bottom - mi.rcMonitor.top;
-}
-
-// 1.1.0 (GitHub 87, the community's Windows 10 fix - merged here instead of patching this file's bytes): before build
-// 20348 Graphics Capture cannot leave out its yellow border (IsBorderRequired is not there), and its frames come on a
-// 40 / 60 ms beat of its own. There a window that is not its whole screen - windowed, or scaled onto it - is taken by
-// DXGI cut down to the window's client area instead. Only from build 19041 on (Windows 10 2004): before it the output
-// window cannot be left out of the screen's copy (WDA_EXCLUDEFROMCAPTURE), and the engine would take its own frames.
-// Windows 11 keeps Graphics Capture for such a window (round 31: it hands over the window's own frames only).
-// SM_WIN10_CROP=1 / 0: as if on such a Windows / not (tests).
-static DWORD WindowsBuild()
-{
-    static const DWORD build = [] {
-        typedef LONG (WINAPI *RtlGetVersionFn)(OSVERSIONINFOW *);
-        OSVERSIONINFOW v = {};
-        v.dwOSVersionInfoSize = sizeof(v);
-        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        const auto get = ntdll ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion")) : nullptr;
-        return get && get(&v) == 0 ? v.dwBuildNumber : DWORD(0);
-    }();
-    return build;
-}
-static bool Win10Crop()
-{
-    static const bool crop = [] {
-        char forced[4] = {};
-        if (GetEnvironmentVariableA("SM_WIN10_CROP", forced, sizeof(forced)) > 0) return forced[0] == '1';
-        const DWORD build = WindowsBuild();
-        return build >= 19041 && build < 20348;
-    }();
-    static bool told = false;
-    if (crop && !told)
-    {
-        told = true;
-        Trace("[window] Windows build %lu: Graphics Capture keeps its border here - a window that is not its whole screen is taken by DXGI, cut to its client area", WindowsBuild());
-    }
-    return crop;
 }
 
 // Does the cut-out take in the whole of its screen.
@@ -978,10 +1064,10 @@ static bool Luma11Wanted(DXGI_FORMAT format)
            !(lfCap.live && lfCap.upside_down) && lfLuma.mapped && lfLuma.view != nullptr && lfLuma.w != 0;
 }
 
-static bool Luma11Ready(UINT pic_w, UINT pic_h)
+static bool Luma11Ready(ID3D11Device *device, UINT pic_w, UINT pic_h)
 {
     Luma11 &l = g_luma11;
-    if (l.device == lfCap.d11 && l.bridge == lfCap.bridge11 && l.w == lfLuma.w && l.h == lfLuma.h && l.pic_w == pic_w &&
+    if (l.device == device && l.bridge == lfCap.bridge11 && l.w == lfLuma.w && l.h == lfLuma.h && l.pic_w == pic_w &&
         l.pic_h == pic_h && l.shader != nullptr)
         return true;
     Luma11Stop();
@@ -994,23 +1080,23 @@ static bool Luma11Ready(UINT pic_w, UINT pic_h)
     ID3DBlob *blob = nullptr, *err = nullptr;
     if (FAILED(CachedCompile(kLumaHlsl, sizeof(kLumaHlsl) - 1, "lf-luma.hlsl", nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, &blob, &err)))
         return fail("its shader did not compile");
-    const HRESULT made = lfCap.d11->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &l.shader);
+    const HRESULT made = device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &l.shader);
     blob->Release();
     if (FAILED(made)) return fail("no compute shader");
     const UINT sizes[4] = { pic_w, pic_h, lfLuma.w, lfLuma.h };
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = sizeof(sizes); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA init = { sizes, 0, 0 };
-    if (FAILED(lfCap.d11->CreateBuffer(&bd, &init, &l.extent))) return fail("no constant buffer");
+    if (FAILED(device->CreateBuffer(&bd, &init, &l.extent))) return fail("no constant buffer");
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = lfLuma.w; td.Height = lfLuma.h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8_UNORM;
     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-    if (FAILED(lfCap.d11->CreateTexture2D(&td, nullptr, &l.target))) return fail("no target");
-    if (FAILED(lfCap.d11->CreateUnorderedAccessView(l.target, nullptr, &l.target_view))) return fail("no view of the target");
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &l.target))) return fail("no target");
+    if (FAILED(device->CreateUnorderedAccessView(l.target, nullptr, &l.target_view))) return fail("no view of the target");
     td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(lfCap.d11->CreateTexture2D(&td, nullptr, &l.staging))) return fail("no texture to read from");
-    if (FAILED(lfCap.d11->CreateShaderResourceView(lfCap.bridge11, nullptr, &l.picture_view))) return fail("no view of the picture");
-    l.device = lfCap.d11; l.device->AddRef();
+    if (FAILED(device->CreateTexture2D(&td, nullptr, &l.staging))) return fail("no texture to read from");
+    if (FAILED(device->CreateShaderResourceView(lfCap.bridge11, nullptr, &l.picture_view))) return fail("no view of the picture");
+    l.device = device; l.device->AddRef();
     l.bridge = lfCap.bridge11; l.bridge->AddRef();
     l.w = lfLuma.w; l.h = lfLuma.h; l.pic_w = pic_w; l.pic_h = pic_h;
     if (!l.told)
@@ -1022,10 +1108,9 @@ static bool Luma11Ready(UINT pic_w, UINT pic_h)
 }
 
 // After the frame's copy into the shared texture, before the flush.
-static void Luma11Record()
+static void Luma11Record(ID3D11DeviceContext *c)
 {
     Luma11 &l = g_luma11;
-    ID3D11DeviceContext *c = lfCap.d11_ctx;
     c->CSSetShader(l.shader, nullptr, 0);
     c->CSSetConstantBuffers(0, 1, &l.extent);
     c->CSSetShaderResources(0, 1, &l.picture_view);
@@ -1039,19 +1124,269 @@ static void Luma11Record()
 }
 
 // After the flush: waits for the card and takes the luma.
-static bool Luma11Read()
+static bool Luma11Read(ID3D11DeviceContext *context)
 {
     Luma11 &l = g_luma11;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(lfCap.d11_ctx->Map(l.staging, 0, D3D11_MAP_READ, 0, &mapped)) || mapped.pData == nullptr) return false;
+    if (FAILED(context->Map(l.staging, 0, D3D11_MAP_READ, 0, &mapped)) || mapped.pData == nullptr) return false;
     for (UINT y = 0; y < l.h; ++y)
         memcpy(lfLuma.view + static_cast<size_t>(y) * l.w, static_cast<const BYTE *>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch, l.w);
-    lfCap.d11_ctx->Unmap(l.staging, 0);
+    context->Unmap(l.staging, 0);
+    return true;
+}
+
+// ---- A picture from the screen's own card -----------------------------------
+// On a laptop the screen usually hangs on the processor's graphics, while the
+// generator's card drives no screen at all - and a picture made on one card
+// cannot be opened by a device on another (Direct3D refuses the shared handle).
+// So a frame goes the way the output does when the screen hangs on another card
+// (lf_show_relay.inl): through a buffer both cards see, in the computer's
+// memory, with a fence each way. The screen's card copies the frame into one of
+// three such buffers; the generator's card copies it out into the bridge
+// picture the channel-order pass reads. Each card waits on the other's fence,
+// never on the processor, and a frame in hand is never waited for.
+struct ScreenCross
+{
+    bool on = false;
+    ID3D12Device *dev = nullptr;                 // on the screen's card
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12CommandAllocator *alloc[3] = {};
+    ID3D12GraphicsCommandList *list = nullptr;   // there: the picture into a shared buffer
+    ID3D12CommandAllocator *alloc_gen[3] = {};   // on the generator's card: a buffer into the bridge picture
+    ID3D12GraphicsCommandList *list_gen[3] = {};
+    ID3D12Fence *input12 = nullptr;              // the copy on the screen card's Direct3D 11 device is done
+    ID3D11Fence *input11 = nullptr;
+    ID3D12Fence *made = nullptr, *made_gen = nullptr;   // a buffer is filled ...
+    ID3D12Fence *read = nullptr, *read_cap = nullptr;   // ... and may be written again
+    ID3D12Heap *heap_gen = nullptr, *heap_cap = nullptr;
+    ID3D12Resource *pass_gen[3] = {}, *pass_cap[3] = {};
+    ID3D12Resource *share12 = nullptr;           // the frame's copy, opened on the screen's card
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT foot = {};
+    UINT64 pass_bytes = 0;
+    UINT w = 0, h = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT64 input_value = 0, made_value = 0, read_value = 0;
+    UINT64 read_of[3] = {};
+    UINT at = 0;
+    HANDLE event = nullptr;
+};
+static ScreenCross g_screen_cross;
+
+static void ScreenCrossStop()
+{
+    ScreenCross &c = g_screen_cross;
+    // Both cards done with the buffers before any of them is let go.
+    if (c.made && c.made_value) AwaitMark(c.made, c.made_value, 2000);
+    if (c.read && c.read_value) AwaitMark(c.read, c.read_value, 2000);
+    for (int i = 0; i < 3; ++i)
+    {
+        if (c.pass_gen[i]) { c.pass_gen[i]->Release(); c.pass_gen[i] = nullptr; }
+        if (c.pass_cap[i]) { c.pass_cap[i]->Release(); c.pass_cap[i] = nullptr; }
+        if (c.list_gen[i]) { c.list_gen[i]->Release(); c.list_gen[i] = nullptr; }
+        if (c.alloc_gen[i]) { c.alloc_gen[i]->Release(); c.alloc_gen[i] = nullptr; }
+        if (c.alloc[i]) { c.alloc[i]->Release(); c.alloc[i] = nullptr; }
+        c.read_of[i] = 0;
+    }
+    if (c.list) { c.list->Release(); c.list = nullptr; }
+    if (c.share12) { c.share12->Release(); c.share12 = nullptr; }
+    if (c.heap_cap) { c.heap_cap->Release(); c.heap_cap = nullptr; }
+    if (c.heap_gen) { c.heap_gen->Release(); c.heap_gen = nullptr; }
+    if (c.input12) { c.input12->Release(); c.input12 = nullptr; }
+    if (c.input11) { c.input11->Release(); c.input11 = nullptr; }
+    if (c.made_gen) { c.made_gen->Release(); c.made_gen = nullptr; }
+    if (c.made) { c.made->Release(); c.made = nullptr; }
+    if (c.read_cap) { c.read_cap->Release(); c.read_cap = nullptr; }
+    if (c.read) { c.read->Release(); c.read = nullptr; }
+    if (c.queue) { c.queue->Release(); c.queue = nullptr; }
+    if (c.dev) { c.dev->Release(); c.dev = nullptr; }
+    if (c.event) { CloseHandle(c.event); c.event = nullptr; }
+    c.on = false;
+    c.w = c.h = 0; c.format = DXGI_FORMAT_UNKNOWN;
+    c.input_value = c.made_value = c.read_value = 0;
+    c.at = 0;
+}
+
+// Everything the two cards need to pass a picture between them, for a picture
+// of w x h in format (the bridge picture, made on the generator's own card).
+static bool ScreenCrossSet(UINT w, UINT h, DXGI_FORMAT format)
+{
+    ScreenCrossStop();
+    ScreenCross &c = g_screen_cross;
+    c.w = w; c.h = h; c.format = format;
+    c.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    bool ok = c.event != nullptr;
+
+    // A device on the screen's card, only to reach the memory both cards see.
+    IDXGIDevice *dxgi = nullptr;
+    IDXGIAdapter *adapter = nullptr;
+    if (ok && (FAILED(lfCap.cap11->QueryInterface(__uuidof(IDXGIDevice), (void **)&dxgi)) || dxgi == nullptr ||
+               FAILED(dxgi->GetAdapter(&adapter)) || adapter == nullptr))
+    { Trace("[capture] the screen's card cannot name its adapter"); ok = false; }
+    if (dxgi) dxgi->Release();
+    if (ok)
+    {
+        const HRESULT made = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), (void **)&c.dev);
+        if (FAILED(made) || c.dev == nullptr)
+        {
+            Trace("[capture] the screen's card gave no Direct3D 12 device (0x%08X) - its frames cannot cross", (unsigned)made);
+            ok = false;
+        }
+    }
+    if (adapter) adapter->Release();
+
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    if (ok) ok = SUCCEEDED(c.dev->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&c.queue)));
+    for (int i = 0; ok && i < 3; ++i)
+        ok = SUCCEEDED(c.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&c.alloc[i]))) &&
+             SUCCEEDED(lfCore.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&c.alloc_gen[i]))) &&
+             SUCCEEDED(lfCore.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, c.alloc_gen[i], nullptr, IID_PPV_ARGS(&c.list_gen[i])));
+    if (ok) ok = SUCCEEDED(c.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, c.alloc[0], nullptr, IID_PPV_ARGS(&c.list)));
+    for (int i = 0; ok && i < 3; ++i) if (FAILED(c.list_gen[i]->Close())) ok = false;
+    if (ok && FAILED(c.list->Close())) ok = false;
+
+    // The frame's copy, opened where the screen's card can see it.
+    if (ok) ok = SUCCEEDED(c.dev->OpenSharedHandle(lfCap.bridge_handle, IID_PPV_ARGS(&c.share12)));
+
+    // The copyable layout of the picture, and the memory both cards see.
+    if (ok)
+    {
+        D3D12_RESOURCE_DESC picture = lfCap.bridge12->GetDesc();
+        UINT rows = 0; UINT64 row_bytes = 0, bytes = 0;
+        lfCore.device->GetCopyableFootprints(&picture, 0, 1, 0, &c.foot, &rows, &row_bytes, &bytes);
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT there = {};
+        c.dev->GetCopyableFootprints(&picture, 0, 1, 0, &there, nullptr, nullptr, nullptr);
+        if (bytes == 0 || there.Footprint.RowPitch != c.foot.Footprint.RowPitch)
+        {
+            Trace("[capture] the two cards lay a picture out differently (%u against %u a row) - frames cannot cross",
+                  (unsigned)there.Footprint.RowPitch, (unsigned)c.foot.Footprint.RowPitch);
+            ok = false;
+        }
+        else c.pass_bytes = (bytes + 65535) & ~UINT64(65535);
+    }
+    D3D12_HEAP_DESC heap = {};
+    heap.SizeInBytes = c.pass_bytes * 3;
+    heap.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.Flags = D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
+    HANDLE shared = nullptr;
+    if (ok) ok = SUCCEEDED(lfCore.device->CreateHeap(&heap, IID_PPV_ARGS(&c.heap_gen))) &&
+                 SUCCEEDED(lfCore.device->CreateSharedHandle(c.heap_gen, nullptr, GENERIC_ALL, nullptr, &shared)) &&
+                 shared != nullptr &&
+                 SUCCEEDED(c.dev->OpenSharedHandle(shared, IID_PPV_ARGS(&c.heap_cap)));
+    if (shared) CloseHandle(shared);
+    D3D12_RESOURCE_DESC pass = {};
+    pass.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    pass.Width = c.pass_bytes; pass.Height = 1; pass.DepthOrArraySize = 1; pass.MipLevels = 1;
+    pass.SampleDesc.Count = 1; pass.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    pass.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+    for (int i = 0; ok && i < 3; ++i)
+        ok = SUCCEEDED(lfCore.device->CreatePlacedResource(c.heap_gen, i * c.pass_bytes, &pass, D3D12_RESOURCE_STATE_COMMON,
+                                                           nullptr, IID_PPV_ARGS(&c.pass_gen[i]))) &&
+             SUCCEEDED(c.dev->CreatePlacedResource(c.heap_cap, i * c.pass_bytes, &pass, D3D12_RESOURCE_STATE_COMMON,
+                                                   nullptr, IID_PPV_ARGS(&c.pass_cap[i])));
+
+    // A fence each way: made on one card, opened on the other.
+    auto fence_pair = [](ID3D12Device *from, ID3D12Device *to, ID3D12Fence **here, ID3D12Fence **there) {
+        if (FAILED(from->CreateFence(0, D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER, IID_PPV_ARGS(here))))
+            return false;
+        HANDLE handle = nullptr;
+        if (FAILED(from->CreateSharedHandle(*here, nullptr, GENERIC_ALL, nullptr, &handle)) || handle == nullptr) return false;
+        const bool opened = SUCCEEDED(to->OpenSharedHandle(handle, IID_PPV_ARGS(there)));
+        CloseHandle(handle);
+        return opened;
+    };
+    ok = ok && fence_pair(c.dev, lfCore.device, &c.made, &c.made_gen) &&
+         fence_pair(lfCore.device, c.dev, &c.read, &c.read_cap);
+    // The copy on the screen card's Direct3D 11 device: the same card, so the
+    // fence only needs to be shared, not shared across adapters.
+    if (ok) ok = SUCCEEDED(c.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&c.input12)));
+    HANDLE input_handle = nullptr;
+    if (ok) ok = SUCCEEDED(c.dev->CreateSharedHandle(c.input12, nullptr, GENERIC_ALL, nullptr, &input_handle)) &&
+                 input_handle != nullptr;
+    if (ok)
+    {
+        ID3D11Device5 *d5 = nullptr;
+        ok = SUCCEEDED(lfCap.cap11->QueryInterface(IID_PPV_ARGS(&d5))) && d5 != nullptr &&
+             SUCCEEDED(d5->OpenSharedFence(input_handle, IID_PPV_ARGS(&c.input11)));
+        if (d5) d5->Release();
+    }
+    if (input_handle) CloseHandle(input_handle);
+
+    if (ok)
+    {
+        c.on = true;
+        Trace("[capture] the screen's frames cross to the generator's card through %llu KB buffers",
+              (unsigned long long)(c.pass_bytes / 1024));
+    }
+    else
+    {
+        Trace("[capture] the two cards cannot pass a picture between them - the frames cannot cross");
+        ScreenCrossStop();
+    }
+    return ok;
+}
+
+// One frame from the screen's card into the bridge picture on the generator's.
+// Called after the frame was copied into the bridge texture on the screen's
+// card and that copy was signalled (input fence).
+static bool ScreenCrossSend()
+{
+    ScreenCross &c = g_screen_cross;
+    if (!c.on || c.list == nullptr || c.list_gen[0] == nullptr) return false;
+
+    const UINT slot = c.at;
+    // The buffer this frame goes into may still be read by the generator's card.
+    if (c.read_of[slot] != 0 && FAILED(c.queue->Wait(c.read_cap, c.read_of[slot]))) return false;
+    if (FAILED(c.alloc[slot]->Reset())) return false;
+    if (FAILED(c.list->Reset(c.alloc[slot], nullptr))) return false;
+    D3D12_RESOURCE_BARRIER to_source = Barrier(c.share12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    c.list->ResourceBarrier(1, &to_source);
+    D3D12_TEXTURE_COPY_LOCATION from = {}, into = {};
+    from.pResource = c.share12; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; from.SubresourceIndex = 0;
+    into.pResource = c.pass_cap[slot]; into.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; into.PlacedFootprint = c.foot;
+    c.list->CopyTextureRegion(&into, 0, 0, 0, &from, nullptr);
+    D3D12_RESOURCE_BARRIER back = Barrier(c.share12, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    c.list->ResourceBarrier(1, &back);
+    if (FAILED(c.list->Close())) return false;
+    ID3D12CommandList *lists[] = { c.list };
+    c.queue->ExecuteCommandLists(1, lists);
+    ++c.made_value;
+    if (FAILED(c.queue->Signal(c.made, c.made_value))) return false;
+
+    // The generator's card: waits for the buffer, copies it into the picture the
+    // channel-order pass reads (which is recorded after this, on the same queue).
+    if (FAILED(lfCore.direct_queue->Wait(c.made_gen, c.made_value))) return false;
+    if (c.read_of[slot] != 0 && c.read->GetCompletedValue() < c.read_of[slot] &&
+        !AwaitMark(c.read, c.read_of[slot], 1000)) return false;
+    if (FAILED(c.alloc_gen[slot]->Reset())) return false;
+    if (FAILED(c.list_gen[slot]->Reset(c.alloc_gen[slot], nullptr))) return false;
+    D3D12_RESOURCE_BARRIER to_dest = Barrier(lfCap.bridge12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    c.list_gen[slot]->ResourceBarrier(1, &to_dest);
+    D3D12_TEXTURE_COPY_LOCATION from_gen = {}, into_gen = {};
+    from_gen.pResource = c.pass_gen[slot]; from_gen.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from_gen.PlacedFootprint = c.foot;
+    into_gen.pResource = lfCap.bridge12; into_gen.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; into_gen.SubresourceIndex = 0;
+    c.list_gen[slot]->CopyTextureRegion(&into_gen, 0, 0, 0, &from_gen, nullptr);
+    D3D12_RESOURCE_BARRIER back_gen = Barrier(lfCap.bridge12, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    c.list_gen[slot]->ResourceBarrier(1, &back_gen);
+    if (FAILED(c.list_gen[slot]->Close())) return false;
+    ID3D12CommandList *gen_lists[] = { c.list_gen[slot] };
+    lfCore.direct_queue->ExecuteCommandLists(1, gen_lists);
+    ++c.read_value;
+    if (FAILED(lfCore.direct_queue->Signal(c.read, c.read_value))) return false;
+    c.read_of[slot] = c.read_value;
+    // (The output window's queue waits on this one: the picture is in the bridge.)
+    if (FAILED(lfCore.direct_queue->Signal(lfCap.sync12, lfCap.sync_value))) return false;
+    ++lfCap.sync_value;
+    ++g_pieces[2];
+    c.at = (c.at + 1) % 3;
     return true;
 }
 
 // Copy a D3D11 source texture into the shared texture and signal the fence
-// D3D12 waits on. A new size or format rebuilds the bridge.
+// D3D12 waits on. A new size or format rebuilds the bridge. A frame made on
+// the screen's own card (another card than the generator's) crosses through
+// ScreenCrossSend instead of the shared handle.
 static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h,
                                       DXGI_FORMAT *out_format)
 {
@@ -1085,6 +1420,34 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
         fd.Format != DXGI_FORMAT_R10G10B10A2_UNORM &&
         fd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
     { Trace("[hdr] cannot use source format %u", fd.Format); return BridgeResult::Error; }
+
+    // Which card the frame came on. The generator's own device (Graphics
+    // Capture, LIVE FLOW) is copied on it; the screen's card's device is the
+    // other way, and its frames cross.
+    ID3D11Device *source_device = nullptr;
+    frame->GetDevice(&source_device);
+    if (source_device == nullptr)
+    { Trace("[source] the frame names no device"); return BridgeResult::Error; }
+    const bool from_screen_card = lfCap.cap11 != nullptr && source_device == lfCap.cap11;
+    source_device->Release();
+    ID3D11Device *copy_dev = from_screen_card ? lfCap.cap11 : lfCap.d11;
+    ID3D11DeviceContext *copy_ctx = from_screen_card ? lfCap.cap11_ctx : lfCap.d11_ctx;
+    if (copy_dev == nullptr || copy_ctx == nullptr) { Trace("[source] the frame's device is gone"); return BridgeResult::Error; }
+    const bool cross = from_screen_card && lfCap.cross;
+
+    // A bridge made the other way (one card against two) is made again.
+    if (lfCap.bridge11 != nullptr && lfCap.bridge_cross != cross)
+    {
+        Trace("[source] the source's card changed - the bridge is made again");
+        if (lfCap.bridge12) { lfCap.bridge12->Release(); lfCap.bridge12 = nullptr; }
+        if (lfCap.bridge_handle) { CloseHandle(lfCap.bridge_handle); lfCap.bridge_handle = nullptr; }
+        if (lfCap.bridge11) { lfCap.bridge11->Release(); lfCap.bridge11 = nullptr; }
+        if (lfCap.sync12) { lfCap.sync12->Release(); lfCap.sync12 = nullptr; }
+        if (lfCap.sync11) { lfCap.sync11->Release(); lfCap.sync11 = nullptr; }
+        ScreenCrossStop();
+        lfCap.bridge_cross = false;
+    }
+
     if (lfCap.bridge11 == nullptr)
     {
         lfHdr.float_frames = fd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1104,32 +1467,56 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
         view_desc.Format = fd.Format; view_desc.SampleDesc.Count = 1; view_desc.Usage = D3D11_USAGE_DEFAULT;
         view_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         view_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-        if (FAILED(lfCap.d11->CreateTexture2D(&view_desc, nullptr, &lfCap.bridge11)))
+        if (FAILED(copy_dev->CreateTexture2D(&view_desc, nullptr, &lfCap.bridge11)))
         { Trace("[source] no shared texture"); return BridgeResult::Error; }
         IDXGIResource1 *r1 = nullptr;
         lfCap.bridge11->QueryInterface(__uuidof(IDXGIResource1), (void **)&r1);
         if (!r1 || FAILED(r1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &lfCap.bridge_handle)))
         { Trace("[source] no NT handle for the shared texture"); if (r1) r1->Release(); goto fail_capture; }
         r1->Release();
-        if (FAILED(lfCore.device->OpenSharedHandle(lfCap.bridge_handle, __uuidof(ID3D12Resource),
-                                           (void **)&lfCap.bridge12)))
-        { Trace("[source] D3D12 could not open the shared texture"); goto fail_capture; }
 
         lfCap.sync_value = 1;
-        if (FAILED(lfCore.device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence),
-                                      reinterpret_cast<void **>(&lfCap.sync12))))
-        { Trace("[source] no shared fence"); goto fail_capture; }
-        HANDLE nt_f = nullptr;
-        lfCore.device->CreateSharedHandle(lfCap.sync12, nullptr, GENERIC_ALL, nullptr, &nt_f);
-        ID3D11Device5 *d5 = nullptr;
-        if (lfCap.d11->QueryInterface(__uuidof(ID3D11Device5), (void **)&d5) == S_OK)
+        if (cross)
         {
-            d5->OpenSharedFence(nt_f, __uuidof(ID3D11Fence), (void **)&lfCap.sync11);
-            d5->Release();
+            // A picture of the generator's own card, filled from the shared buffers.
+            D3D12_HEAP_PROPERTIES vram_heap = { D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC tex_desc = {};
+            tex_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            tex_desc.Width = fd.Width; tex_desc.Height = fd.Height; tex_desc.DepthOrArraySize = 1; tex_desc.MipLevels = 1;
+            tex_desc.Format = fd.Format; tex_desc.SampleDesc.Count = 1;
+            tex_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            tex_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+            if (FAILED(lfCore.device->CreateCommittedResource(&vram_heap, D3D12_HEAP_FLAG_NONE, &tex_desc,
+                                                      D3D12_RESOURCE_STATE_COMMON, nullptr, __uuidof(ID3D12Resource),
+                                                      reinterpret_cast<void **>(&lfCap.bridge12))))
+            { Trace("[source] no picture of the screen's size on the generator's card"); goto fail_capture; }
+            // (The output window's queue waits on this: the frame is in the bridge.)
+            if (FAILED(lfCore.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence),
+                                          reinterpret_cast<void **>(&lfCap.sync12))))
+            { Trace("[source] no fence for the bridge picture"); goto fail_capture; }
+            if (!ScreenCrossSet(fd.Width, fd.Height, fd.Format)) goto fail_capture;
         }
-        if (nt_f) CloseHandle(nt_f);
-        if (!lfCap.sync11)
-        { Trace("[source] the D3D11 side has no fence - source unusable"); goto fail_capture; }
+        else
+        {
+            if (FAILED(lfCore.device->OpenSharedHandle(lfCap.bridge_handle, __uuidof(ID3D12Resource),
+                                               (void **)&lfCap.bridge12)))
+            { Trace("[source] D3D12 could not open the shared texture"); goto fail_capture; }
+
+            if (FAILED(lfCore.device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence),
+                                          reinterpret_cast<void **>(&lfCap.sync12))))
+            { Trace("[source] no shared fence"); goto fail_capture; }
+            HANDLE nt_f = nullptr;
+            lfCore.device->CreateSharedHandle(lfCap.sync12, nullptr, GENERIC_ALL, nullptr, &nt_f);
+            ID3D11Device5 *d5 = nullptr;
+            if (copy_dev->QueryInterface(__uuidof(ID3D11Device5), (void **)&d5) == S_OK)
+            {
+                d5->OpenSharedFence(nt_f, __uuidof(ID3D11Fence), (void **)&lfCap.sync11);
+                d5->Release();
+            }
+            if (nt_f) CloseHandle(nt_f);
+            if (!lfCap.sync11)
+            { Trace("[source] the D3D11 side has no fence - source unusable"); goto fail_capture; }
+        }
         D3D12_HEAP_PROPERTIES vram_heap = { D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC tex_desc = {};
         tex_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1142,7 +1529,9 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
                                                   __uuidof(ID3D12Resource),
                                                   reinterpret_cast<void **>(&lfCap.rgba))))
         { Trace("[source] no RGBA target"); goto fail_capture; }
-        Trace("[source] shared picture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
+        lfCap.bridge_cross = cross;
+        Trace("[source] shared picture %ux%u ready%s", (UINT)fd.Width, (UINT)fd.Height,
+              cross ? " (through the memory both cards see)" : "");
     }
 
     {
@@ -1156,27 +1545,51 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
                 (unsigned)view_desc.Format, (unsigned)fd.Format);
             CloseFgResources();
             HdrRelease();
+            ScreenCrossStop();
             if (lfCap.bridge12) { lfCap.bridge12->Release(); lfCap.bridge12 = nullptr; }
             if (lfCap.bridge_handle)  { CloseHandle(lfCap.bridge_handle); lfCap.bridge_handle = nullptr; }
             if (lfCap.sync12) { lfCap.sync12->Release(); lfCap.sync12 = nullptr; }
             if (lfCap.sync11) { lfCap.sync11->Release(); lfCap.sync11 = nullptr; }
             if (lfCap.rgba) { lfCap.rgba->Release(); lfCap.rgba = nullptr; }
             if (lfCap.bridge11) { lfCap.bridge11->Release(); lfCap.bridge11 = nullptr; }
+            lfCap.bridge_cross = false;
             return BridgeResult::NewFormat;
         }
         if (g_convert_mark) { AwaitMark(lfCore.timeline, g_convert_mark, 2000); g_convert_mark = 0; }
-        lfCap.d11_ctx->CopySubresourceRegion(lfCap.bridge11, 0, 0, 0, 0, frame, 0, &source_box);
+        if (cross && g_screen_cross.made_value != 0)
+        {
+            // The screen's card may still be copying the frame before into the
+            // picture this one goes into: written again only once that is done.
+            if (!AwaitMark(g_screen_cross.made, g_screen_cross.made_value, 2000)) return BridgeResult::Error;
+        }
+        copy_ctx->CopySubresourceRegion(lfCap.bridge11, 0, 0, 0, 0, frame, 0, &source_box);
     }
     g_capture_joined = false;
-    const bool luma_here = Luma11Wanted(fd.Format) && Luma11Ready(fd.Width, fd.Height);
-    if (luma_here) Luma11Record();
+    const bool luma_here = Luma11Wanted(fd.Format) && Luma11Ready(copy_dev, fd.Width, fd.Height);
+    if (luma_here) Luma11Record(copy_ctx);
     ID3D11DeviceContext4 *ctx4 = nullptr;
-    if (FAILED(lfCap.d11_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&ctx4)))
+    if (FAILED(copy_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&ctx4)))
         return BridgeResult::Error;
+    if (cross)
+    {
+        const HRESULT signaled = ctx4->Signal(g_screen_cross.input11, ++g_screen_cross.input_value);
+        ctx4->Release();
+        if (FAILED(signaled)) return BridgeResult::Error;
+        if (FAILED(g_screen_cross.queue->Wait(g_screen_cross.input12, g_screen_cross.input_value)))
+            return BridgeResult::Error;
+        copy_ctx->Flush();
+        if (!ScreenCrossSend()) { Trace("[source] the frame could not cross to the generator's card"); return BridgeResult::Error; }
+        if (luma_here)
+        {
+            if (Luma11Read(copy_ctx)) g_capture_joined = true;
+            else { Trace("[luma] the capture's device did not hand the luma over - made on the generator's from here on"); g_luma11.failed = true; }
+        }
+        return BridgeResult::Done;
+    }
     const HRESULT signaled = ctx4->Signal(lfCap.sync11, lfCap.sync_value);
     ctx4->Release();
     if (FAILED(signaled)) return BridgeResult::Error;
-    lfCap.d11_ctx->Flush();
+    copy_ctx->Flush();
     ++g_pieces[2];
 
     const UINT64 wanted = lfCap.sync_value;
@@ -1186,18 +1599,20 @@ static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h
     ++lfCap.sync_value;
     if (luma_here)
     {
-        if (Luma11Read()) g_capture_joined = true;
+        if (Luma11Read(copy_ctx)) g_capture_joined = true;
         else { Trace("[luma] the capture's device did not hand the luma over - made on the generator's from here on"); g_luma11.failed = true; }
     }
     return BridgeResult::Done;
 fail_capture:
 
+    ScreenCrossStop();
     if (lfCap.bridge12) { lfCap.bridge12->Release(); lfCap.bridge12 = nullptr; }
     if (lfCap.bridge_handle)  { CloseHandle(lfCap.bridge_handle); lfCap.bridge_handle = nullptr; }
     if (lfCap.sync12) { lfCap.sync12->Release(); lfCap.sync12 = nullptr; }
     if (lfCap.sync11) { lfCap.sync11->Release(); lfCap.sync11 = nullptr; }
     if (lfCap.rgba) { lfCap.rgba->Release(); lfCap.rgba = nullptr; }
     if (lfCap.bridge11) { lfCap.bridge11->Release(); lfCap.bridge11 = nullptr; }
+    lfCap.bridge_cross = false;
     return BridgeResult::Error;
 }
 

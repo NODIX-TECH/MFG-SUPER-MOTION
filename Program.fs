@@ -23,4 +23,5 @@ module Program =
 
     [<EntryPoint; STAThread>]
     let main argv =
+        ARMO.Infrastructure.WindowsPerformance.applyToCurrent ()
         buildAvaloniaApp().StartWithClassicDesktopLifetime(argv)

@@ -152,14 +152,14 @@ module Preferences =
     let normalizeConsole (c: ConsoleOptions) =
         let text (s: string) = if isNull s then "" else s.Trim()
         if isNull (box c) then consoleDefaults
-        else { c with Platform = Math.Clamp(c.Platform, 0, 1); Resolution = Math.Clamp(c.Resolution, 0, 3); Fps = Math.Clamp(c.Fps, 0, 1)
+        else { c with Platform = Math.Clamp(c.Platform, 0, 1); Resolution = Math.Clamp(c.Resolution, 0, 1); Fps = Math.Clamp(c.Fps, 0, 1)
                       Bitrate = (if c.Bitrate <= 0 then 0 else Math.Clamp(c.Bitrate, 2000, 100000)); Codec = Math.Clamp(c.Codec, 0, 2)
                       Multiplier = Math.Clamp(c.Multiplier, 0, 3); Address = text c.Address; AccountId = text c.AccountId
                       Passcode = (let p = text c.Passcode in if p.Length = 4 && p |> Seq.forall Char.IsDigit then p else "")
                       Linked = (if isNull c.Linked then [||] else c.Linked |> Array.filter (fun l -> not (isNull (box l)) && not (String.IsNullOrEmpty l.RegistKey)) |> Array.truncate 8) }
-    /// The bitrate asked for when it is "by the resolution", kilobits a second (what Remote Play's own clients use).
+    /// The bitrate asked for when it is "by the resolution", kilobits a second (25 Mbit/s at 1080p for crisp LAN picture).
     let consoleBitrate (c: ConsoleOptions) =
-        if c.Bitrate > 0 then c.Bitrate else match c.Resolution with 0 -> 10000 | 1 -> 15000 | 2 -> 30000 | _ -> 40000
+        if c.Bitrate > 0 then c.Bitrate else match c.Resolution with 0 -> 10000 | _ -> 25000
     let schema = 27
     // The sync modes the engine has (see SyncMode).
     let syncModes = 5

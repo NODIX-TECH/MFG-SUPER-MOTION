@@ -588,6 +588,8 @@ struct State
 
     bool shaders_ready = false, shaders_failed = false;
     ULONGLONG last_warn_tick = 0;
+    UINT64 last_fence = 0;
+    UINT logged_co_nw = 0, logged_co_nh = 0;
 };
 static State g;
 
@@ -813,6 +815,7 @@ static bool EnsureRuntime()
     if (g.dll_ver != ver)
     {
         CmdDrain();
+        g.last_fence = 0;
         ReleaseFeatures();
         if (g.params) { NVSDK_NGX_D3D12_DestroyParameters(g.params); g.params = nullptr; }
         if (g.module) { FreeLibrary(g.module); g.module = nullptr; }
@@ -1034,7 +1037,7 @@ static bool EnsurePipelineAndFeatures(UINT pic_w, UINT pic_h, UINT nw, UINT nh, 
     const bool size_changed = (g.pic_w != pic_w || g.pic_h != pic_h || g.nw != nw || g.nh != nh);
     const bool need_features = (!g.feature || g.created_nw != nw || g.created_nh != nh ||
                                 g.created_preset != preset || g.created_passes != passes);
-    if (size_changed || need_features) CmdDrain();
+    if (size_changed || need_features) { CmdDrain(); g.last_fence = 0; }
 
     if (size_changed)
     {
@@ -1574,6 +1577,54 @@ static void RunFinish(ID3D12Resource *output, UINT w, UINT hgt, float edge, ID3D
     g.finish_hist_valid = true;
 }
 
+static void WorkingSize(UINT pic_w, UINT pic_h, UINT &nw, UINT &nh)
+{
+    // Always guarantee even dimensions (fixes odd heights like 2560x1439 that break NGX/compute alignment).
+    const UINT even_w = std::max(64u, pic_w & ~1u);
+    const UINT even_h = std::max(64u, pic_h & ~1u);
+    const int scale_pct = std::clamp(smOpt.dlss5_scale.load(), 25, 100);
+    nw = std::clamp(static_cast<UINT>(std::lround(even_w * (scale_pct / 100.0) / 2.0)) * 2u, 64u, even_w);
+    nh = std::clamp(static_cast<UINT>(std::lround(even_h * (scale_pct / 100.0) / 2.0)) * 2u, 64u, even_h);
+
+    // When DLSS 5 co-runs with Frame Generation, cap the neural network's internal resolution by GPU
+    // architecture while DispatchDetail keeps 100% of the native pic_w x pic_h sharpness and textures.
+    // Without Frame Generation, the user's exact dlss5_scale runs untouched.
+    if (!FgRequested())
+    {
+        g.logged_co_nw = g.logged_co_nh = 0;
+        return;
+    }
+    static const int env_max_h = [] {
+        char v[16] = {};
+        return GetEnvironmentVariableA("SM_DLSS5_FG_MAX_H", v, sizeof(v)) > 0 ? atoi(v) : -1;
+    }();
+    const int sm = FgComputeCapability();
+    UINT co_max_h = 0;
+    if (env_max_h >= 0)
+    {
+        co_max_h = env_max_h == 0 ? 0u : static_cast<UINT>(std::clamp(env_max_h, 240, 2160));
+    }
+    else
+    {
+        co_max_h = sm >= 100 ? 1080u
+                 : sm >= 89  ? 720u
+                             : 512u;
+    }
+    if (co_max_h > 0 && nh > co_max_h)
+    {
+        const double ratio = static_cast<double>(co_max_h) / static_cast<double>(nh);
+        nw = std::clamp(static_cast<UINT>(std::lround((nw * ratio) / 8.0)) * 8u, 64u, even_w);
+        nh = std::clamp(static_cast<UINT>(std::lround(co_max_h / 8.0)) * 8u, 64u, even_h);
+        if (g.logged_co_nw != nw || g.logged_co_nh != nh)
+        {
+            g.logged_co_nw = nw;
+            g.logged_co_nh = nh;
+            Trace("[dlss5] co-running with frame generation (SM%d): neural pass %ux%u, native %ux%u detail preserved",
+                  sm, nw, nh, pic_w, pic_h);
+        }
+    }
+}
+
 } // namespace dlss5
 
 static bool Dlss5Wanted()
@@ -1598,9 +1649,8 @@ static bool Dlss5PrepareSession(UINT pic_w, UINT pic_h)
 {
     if (!Dlss5Wanted() || pic_w < 64 || pic_h < 64) return true;
     if (!dlss5::EnsureRuntime()) return false;
-    const int scale_pct = std::clamp(smOpt.dlss5_scale.load(), 25, 100);
-    const UINT nw = std::max(64u, std::min(pic_w, static_cast<UINT>(std::lround(pic_w * (scale_pct / 100.0) / 2.0)) * 2u));
-    const UINT nh = std::max(64u, std::min(pic_h, static_cast<UINT>(std::lround(pic_h * (scale_pct / 100.0) / 2.0)) * 2u));
+    UINT nw = 0, nh = 0;
+    dlss5::WorkingSize(pic_w, pic_h, nw, nh);
     const UINT preset = static_cast<UINT>(std::clamp(smOpt.dlss5_model.load(), 0, 1));
     const UINT passes = static_cast<UINT>(std::clamp(smOpt.dlss5_passes.load(), 1, static_cast<int>(dlss5::kMaxPasses)));
     return dlss5::EnsurePipelineAndFeatures(pic_w, pic_h, nw, nh, preset, passes);
@@ -1612,6 +1662,11 @@ static bool Dlss5RestoreSource(Pipeline &pipe)
     if (pipe.picture.gpu_tex->GetDesc().Width != dlss5::g.pic_w ||
         pipe.picture.gpu_tex->GetDesc().Height != dlss5::g.pic_h)
         return false;
+    if (dlss5::g.last_fence)
+    {
+        if (!AwaitMark(lfCore.timeline, dlss5::g.last_fence, 10000)) return false;
+        dlss5::g.last_fence = 0;
+    }
     if (!CmdOpen()) return false;
     D3D12_RESOURCE_BARRIER in[] = {
         Barrier(dlss5::g.source_copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
@@ -1631,6 +1686,8 @@ static bool Dlss5RestoreSource(Pipeline &pipe)
 static void Dlss5Close()
 {
     CmdDrain();
+    dlss5::g.last_fence = 0;
+    dlss5::g.logged_co_nw = dlss5::g.logged_co_nh = 0;
     dlss5::ReleaseFeatures();
     dlss5::CloseTextures();
     auto rel = [](auto *&ptr) { if (ptr) { ptr->Release(); ptr = nullptr; } };
@@ -1664,7 +1721,7 @@ static void Dlss5Close()
     dlss5::g.runtime_failed = false;
 }
 
-static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy)
+static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy, bool wait_gpu)
 {
     if (!Dlss5Wanted() || !pipe.picture.gpu_tex) return true;
     if (!dlss5::EnsureRuntime()) return false;
@@ -1673,15 +1730,19 @@ static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy)
     const UINT pic_h = pipe.stretched ? pipe.screen_h : pipe.work_h;
     if (pic_w < 64 || pic_h < 64) return false;
 
-    const int scale_pct = std::clamp(smOpt.dlss5_scale.load(), 25, 100);
-    const UINT nw = std::max(64u, std::min(pic_w, static_cast<UINT>(std::lround(pic_w * (scale_pct / 100.0) / 2.0)) * 2u));
-    const UINT nh = std::max(64u, std::min(pic_h, static_cast<UINT>(std::lround(pic_h * (scale_pct / 100.0) / 2.0)) * 2u));
+    UINT nw = 0, nh = 0;
+    dlss5::WorkingSize(pic_w, pic_h, nw, nh);
     const bool small_nr = (nw != pic_w || nh != pic_h);
     const UINT preset = static_cast<UINT>(std::clamp(smOpt.dlss5_model.load(), 0, 1));
     const UINT passes = static_cast<UINT>(std::clamp(smOpt.dlss5_passes.load(), 1, static_cast<int>(dlss5::kMaxPasses)));
 
     if (!dlss5::EnsurePipelineAndFeatures(pic_w, pic_h, nw, nh, preset, passes)) return false;
     if (from_source_copy && !dlss5::g.has_source_copy) return true;
+    if (dlss5::g.last_fence)
+    {
+        if (!AwaitMark(lfCore.timeline, dlss5::g.last_fence, 10000)) return false;
+        dlss5::g.last_fence = 0;
+    }
 
     const float raw_intensity = std::clamp(smOpt.dlss5_intensity.load(), 0, 300) / 100.0f;
     const float net_intensity = std::min(raw_intensity, 1.0f);
@@ -1696,8 +1757,9 @@ static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy)
     const float sat           = std::clamp(smOpt.dlss5_sat.load() / 100.0f, -1.0f, 1.0f);
     const float warm          = std::clamp(smOpt.dlss5_warm.load() / 100.0f, -1.0f, 1.0f);
     const bool has_colors     = (bright != 0.0f || contrast != 0.0f || sat != 0.0f || warm != 0.0f);
+    const bool co_fg          = FgRequested();
     const bool halo_active    = halo > 0.0f && dlss5::EnsureHaloTargets(nw, nh);
-    const bool denoise_active = denoise > 0.0f && dlss5::EnsureDenoiseTargets(pic_w, pic_h);
+    const bool denoise_active = denoise > 0.0f && (!co_fg || denoise > 0.10f) && dlss5::EnsureDenoiseTargets(pic_w, pic_h);
     const bool finish_active  = (edge > 0.0f || has_colors) && dlss5::EnsureFinishTargets(pic_w, pic_h);
     const bool need_detail    = small_nr || halo_active || keep_colors > 0.0f || low_light > 0.0f || detail_gain > 1.0f;
 
@@ -1886,5 +1948,12 @@ static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy)
     lfCore.cmd->ResourceBarrier(_countof(copy_out), copy_out);
 
     const UINT64 fence = CmdSubmit();
-    return fence != 0 && AwaitMark(lfCore.timeline, fence, 10000);
+    if (!fence) return false;
+    if (!wait_gpu)
+    {
+        dlss5::g.last_fence = fence;
+        return true;
+    }
+    dlss5::g.last_fence = 0;
+    return AwaitMark(lfCore.timeline, fence, 10000);
 }

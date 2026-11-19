@@ -526,7 +526,9 @@ type MotionEngine() =
                 text.AppendLine("frame_log=1") |> ignore
 #endif
                 text.Append("owner=").AppendLine(string Environment.ProcessId) |> ignore
-                if targetWindow <> 0UL then text.Append("hwnd=").AppendLine(string targetWindow) |> ignore
+                if targetWindow <> 0UL then
+                    text.Append("hwnd=").AppendLine(string targetWindow) |> ignore
+                    text.AppendLine("stream_dedup=1") |> ignore
                 File.WriteAllText(startFile, text.ToString(), UTF8Encoding(false))
                 let info =
                     ProcessStartInfo(
@@ -547,6 +549,7 @@ type MotionEngine() =
                     proc <- started
                     sent <- lines)
                 if not (started.Start()) then failwith "not started"
+                WindowsPerformance.applyToProcess started ProcessPriorityClass.High
                 started.BeginOutputReadLine()
                 true
             with _ ->

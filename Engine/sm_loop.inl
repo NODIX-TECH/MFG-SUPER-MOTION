@@ -101,6 +101,7 @@ static bool SessionBuild(Session &s)
     UINT luma_w = 0, luma_h = 0;
     LumaSizeFor(s.pic_w, s.pic_h, luma_w, luma_h);
     if (!LumaStart(luma_w, luma_h)) Trace("[luma] no small luma - scene cuts and repeated frames go unnoticed");
+    LumaResetHistory();
     if (Dlss5Wanted()) Dlss5PrepareSession(s.pic_w, s.pic_h);
     lfOut.force_next = true;
     s.built = true;
@@ -177,6 +178,13 @@ static void GivenCheck(double stamp)
     static unsigned filled = 0, next = 0;
     const int fps = smOpt.game_fps.load();
     if (fps < 20 || fps > 500) { g_given_off = false; last = 0.0; filled = next = 0; since = 0.0; return; }
+    // Console Link manual Game FPS lock: never silently disable the user's manual lock on temporary console dips.
+    if (smOpt.stream_dedup.load() != 0)
+    {
+        g_given_off = false;
+        last = 0.0; filled = next = 0; since = 0.0;
+        return;
+    }
     const double span = last > 0.0 ? stamp - last : 0.0;
     last = stamp;
     if (span <= 0.0 || span > 0.2) return;
@@ -319,8 +327,16 @@ static int FrameStep(Session &s)
     // (Game FPS given: the same picture again is a repeat only within one frame of the game - later, the game is
     // standing still and it is its frame; a part that changed is a frame.)
     const double given = GivenFrameTime();
-    const bool again = source_fresh && (given > 0.0 ? change == 0.0 && lfCap.stamp - stamp_before < 0.97 * given
-                                                    : (change == 0.0 || OnlyACorner(change)));
+    const bool stream_dedup = smOpt.stream_dedup.load() != 0;
+    const double cap_dt = (stamp_before > 0.0 && lfCap.stamp > stamp_before) ? (lfCap.stamp - stamp_before) : 1.0;
+    const bool stream_again = source_fresh && stream_dedup &&
+        StreamRepeatNow(lfCap.stamp, stamp_before, change, g_luma_strong, StreamMaxFrameTime());
+    const bool corner_again = (!stream_dedup || cap_dt < 0.0235) && OnlyACorner(change);
+    const bool again = source_fresh && (stream_again ||
+        (given > 0.0 ? change == 0.0 && lfCap.stamp - stamp_before < 0.97 * given
+                     : (change == 0.0 || corner_again)));
+    // Update luma baseline on accepted frames (and preserve legacy OnlyACorner update when stream_dedup == 0).
+    if (source_fresh && (!again || (!stream_dedup && change > 0.0))) LumaAcceptNow();
     if (source_fresh) { SourceSeen(again); RepeatLearn(lfCap.stamp, again); }
     if (again)
     {
@@ -414,6 +430,7 @@ static int FrameStep(Session &s)
                 Trace("[watch] nothing new used for %.1f s with the game in front (%u frames of the capture came meanwhile) - the source is opened again",
                       (now_tick - s.watch_fresh_at) / 1000.0, arrived);
                 g_repeat_guess = RepeatGuess();
+                LumaResetHistory();
                 FgGateForget();
                 lfOut.force_next = true;
                 s.watch_reopened_at = now_tick;
@@ -513,7 +530,7 @@ static int FrameStep(Session &s)
 
     if (source_fresh && Dlss5Wanted())
     {
-        if (!Dlss5Run(pipe, s.frame == 0 || reset, false) && lfRun.gpu_lost) return 6;
+        if (!Dlss5Run(pipe, s.frame == 0 || reset, false, !generating) && lfRun.gpu_lost) return 6;
         LoopBeat();
         const ULONGLONG post_dlss5 = GetTickCount64();
         s.last_fresh_tick = post_dlss5;

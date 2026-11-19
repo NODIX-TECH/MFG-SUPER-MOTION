@@ -15,7 +15,7 @@ module AppData =
 
     let currentVersion =
         let v = Assembly.GetExecutingAssembly().GetName().Version
-        if isNull v then "1.1.1" else sprintf "%d.%d.%d" v.Major v.Minor (max 0 v.Build)
+        if isNull v then "1.1.2" else sprintf "%d.%d.%d" v.Major v.Minor (max 0 v.Build)
 
     let private cleanedFile = Path.Combine(folder, "cleaned-version.txt")
 

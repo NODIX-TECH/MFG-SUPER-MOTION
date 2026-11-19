@@ -249,6 +249,7 @@ static unsigned ApplyOption(const char *key, const char *value)
     if (KeyIs(key, "gpu"))          { set(smOpt.gpu, -1, 63); return 0; }
     if (KeyIs(key, "hwnd"))         { smOpt.hwnd = static_cast<unsigned long long>(number); return 0; }
     if (KeyIs(key, "owner"))        { smOpt.owner = static_cast<unsigned long>(number); return 0; }
+    if (KeyIs(key, "stream_dedup")) { smOpt.stream_dedup = (number != 0) ? 1 : 0; return 0; }
     return 0;
 }
 

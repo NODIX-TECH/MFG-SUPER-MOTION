@@ -10,6 +10,7 @@ open System.Net.WebSockets
 open System.Runtime.InteropServices
 open System.Security.Cryptography
 open System.Text
+open System.Text.Encodings.Web
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
@@ -91,9 +92,18 @@ module Edge =
         | Some exe ->
             let info = ProcessStartInfo(exe, UseShellExecute = false)
             for a in [ "--user-data-dir=" + profile profileName; "--no-first-run"; "--no-default-browser-check"; "--disable-sync"
-                       "--disable-features=msEdgeSidebarV2,msHubApps,msImplicitSignin,EdgeCollections"; "--autoplay-policy=no-user-gesture-required" ] @ extra @ [ "--app=" + url ] do
+                       "--disable-background-mode"; "--disable-backgrounding-occluded-windows"; "--disable-renderer-backgrounding"; "--disable-background-timer-throttling"
+                       "--disable-features=msEdgeSidebarV2,msHubApps,msImplicitSignin,EdgeCollections,CalculateNativeWinOcclusion,WebRtcHideLocalIpsWithMdns"
+                       "--autoplay-policy=no-user-gesture-required" ] @ extra @ [ "--app=" + url ] do
                 info.ArgumentList.Add a
-            try Some(Process.Start info) with _ -> None
+            try
+                let p = Process.Start info
+                if isNull p then None
+                else
+                    if profileName = "edge-player" then
+                        WindowsPerformance.applyToProcess p ProcessPriorityClass.AboveNormal
+                    Some p
+            with _ -> None
 
 module XboxAuth =
     let private appId = "000000004c20a908"
@@ -101,12 +111,16 @@ module XboxAuth =
     let redirectPrefix = "ms-xal-000000004c20a908://auth"
     let private savedPath = Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData, "MFG SUPER MOTION", "Console", "xbox.bin")
     let private http = new HttpClient(Timeout = TimeSpan.FromSeconds 20.0)
+    let private relaxedJson = JsonSerializerOptions(Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
     let private b64url (bytes: byte[]) = Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
     /// What is kept between runs: the device's key (Xbox's sign-in binds the tokens to it), the Microsoft account's
     /// refresh token, and the gamertag to show. Sealed with Windows' protection (DPAPI), never in the settings file.
     type Saved = { Key: string; Refresh: string; Gamertag: string }
     let mutable private saved: Saved option = None
+    let mutable private stream: XboxStreamToken option = None
+    let mutable private key: ECDsa = null
+    let invalidateStream () = stream <- None
     let private load () =
         match saved with
         | Some s -> Some s
@@ -136,10 +150,13 @@ module XboxAuth =
     let isSignedIn () = match load () with Some s -> s.Refresh <> "" | None -> false
     let signOut () =
         saved <- None
+        stream <- None
+        if not (isNull key) then
+            (try key.Dispose() with _ -> ())
+            key <- null
         try if File.Exists savedPath then File.Delete savedPath with _ -> ()
 
     // The device key: P-256, made once and kept with the sign-in.
-    let mutable private key: ECDsa = null
     let private deviceKey () =
         if isNull key then
             let k = ECDsa.Create(ECCurve.NamedCurves.nistP256)
@@ -175,7 +192,7 @@ module XboxAuth =
 
     let private postSigned (url: string) (body: JsonObject) =
         task {
-            let text = body.ToJsonString()
+            let text = body.ToJsonString(relaxedJson)
             use request = new HttpRequestMessage(HttpMethod.Post, url)
             request.Headers.Add("x-xbl-contract-version", "1")
             request.Headers.Add("Cache-Control", "no-store, must-revalidate, no-cache")
@@ -184,7 +201,13 @@ module XboxAuth =
             let! response = http.SendAsync request
             let! answer = response.Content.ReadAsStringAsync()
             if not response.IsSuccessStatusCode then
-                failwithf "%s: %d %s" (Uri(url).Host) (int response.StatusCode) (if answer.Length > 200 then answer.Substring(0, 200) else answer)
+                let detail =
+                    if answer <> "" then (if answer.Length > 200 then answer.Substring(0, 200) else answer)
+                    else
+                        let xerr = match response.Headers.TryGetValues "X-Err" with | true, v -> "X-Err=" + String.Join(",", v) | _ -> ""
+                        let corr = match response.Headers.TryGetValues "X-XblCorrelationId" with | true, v -> "cid=" + String.Join(",", v) | _ -> ""
+                        [ xerr; corr ] |> List.filter (fun s -> s <> "") |> String.concat " "
+                failwithf "%s: %d %s" (Uri(url).Host) (int response.StatusCode) detail
             let session = match response.Headers.TryGetValues "X-SessionId" with | true, v -> Seq.head v | _ -> ""
             return JsonNode.Parse(if answer = "" then "{}" else answer), session
         }
@@ -246,7 +269,7 @@ module XboxAuth =
                                   "ProofKey", proofKey () ])
             if session <> "" then body["SessionId"] <- JsonValue.Create(session)
             let! (answer, _) = postSigned "https://sisu.xboxlive.com/authorize" body
-            return answer
+            return answer, device
         }
 
     /// The page's answer (the address Microsoft sent the browser to) turned into the account's tokens - kept.
@@ -262,13 +285,13 @@ module XboxAuth =
                 postForm "https://login.live.com/oauth20_token.srf"
                     [ "client_id", appId; "code", get "code"; "code_verifier", begun.Verifier; "grant_type", "authorization_code"
                       "redirect_uri", redirectPrefix; "scope", "service::user.auth.xboxlive.com::MBI_SSL" ]
-            let! sisu = sisuAuthorize (str user [ "access_token" ]) begun.Session
+            let! (sisu, _) = sisuAuthorize (str user [ "access_token" ]) begun.Session
             let tag = str sisu [ "AuthorizationToken"; "DisplayClaims"; "xui"; "0"; "gtg" ]
             store { Key = keyText (); Refresh = str user [ "refresh_token" ]; Gamertag = tag }
+            stream <- None
             return tag
         }
 
-    let mutable private stream: XboxStreamToken option = None
     /// xHome's streaming token: the account's refresh token renewed (and kept), SISU, XSTS for gssv, then gssv's login.
     let streamToken () =
         task {
@@ -280,16 +303,21 @@ module XboxAuth =
                     postForm "https://login.live.com/oauth20_token.srf"
                         [ "client_id", appId; "grant_type", "refresh_token"; "refresh_token", s.Refresh; "scope", "service::user.auth.xboxlive.com::MBI_SSL" ]
                 let refresh = str user [ "refresh_token" ]
-                let! sisu = sisuAuthorize (str user [ "access_token" ]) ""
+                let! (sisu, device) = sisuAuthorize (str user [ "access_token" ]) ""
                 let tag = str sisu [ "AuthorizationToken"; "DisplayClaims"; "xui"; "0"; "gtg" ]
                 store { s with Key = keyText (); Refresh = (if refresh <> "" then refresh else s.Refresh); Gamertag = (if tag <> "" then tag else s.Gamertag) }
+                let xstsProps = JsonObject()
+                xstsProps["SandboxId"] <- JsonValue.Create("RETAIL")
+                let dev = match str sisu [ "DeviceToken" ] with "" -> device | d -> d
+                if dev <> "" then xstsProps["DeviceToken"] <- JsonValue.Create(dev)
+                let title = str sisu [ "TitleToken"; "Token" ]
+                if title <> "" then xstsProps["TitleToken"] <- JsonValue.Create(title)
+                xstsProps["UserTokens"] <- JsonArray(JsonValue.Create(str sisu [ "UserToken"; "Token" ]))
                 let xsts =
-                    JsonObject(dict [ "Properties", JsonObject(dict [ "SandboxId", JsonValue.Create("RETAIL") :> JsonNode; "DeviceToken", JsonValue.Create(str sisu [ "DeviceToken" ])
-                                                                      "TitleToken", JsonValue.Create(str sisu [ "TitleToken"; "Token" ])
-                                                                      "UserTokens", JsonArray(JsonValue.Create(str sisu [ "UserToken"; "Token" ])) ]) :> JsonNode
+                    JsonObject(dict [ "Properties", xstsProps :> JsonNode
                                       "RelyingParty", JsonValue.Create("http://gssv.xboxlive.com/"); "TokenType", JsonValue.Create("JWT") ])
                 let! (gssv, _) = postSigned "https://xsts.auth.xboxlive.com/xsts/authorize" xsts
-                let body = JsonObject(dict [ "token", JsonValue.Create(str gssv [ "Token" ]) :> JsonNode; "offeringId", JsonValue.Create("xhome") ]).ToJsonString()
+                let body = JsonObject(dict [ "token", JsonValue.Create(str gssv [ "Token" ]) :> JsonNode; "offeringId", JsonValue.Create("xhome") ]).ToJsonString(relaxedJson)
                 use request = new HttpRequestMessage(HttpMethod.Post, "https://xhome.gssv-play-prod.xboxlive.com/v2/login/user")
                 request.Headers.Add("x-gssv-client", "XboxComBrowser")
                 request.Headers.Add("Cache-Control", "no-store, must-revalidate, no-cache")
@@ -301,7 +329,7 @@ module XboxAuth =
                 let regions = match node["offeringSettings"] with null -> null | o -> (match o["regions"] with :? JsonArray as a -> a | _ -> null)
                 let region =
                     if isNull regions || regions.Count = 0 then null
-                    else regions |> Seq.tryFind (fun r -> not (isNull r) && str r [ "isDefault" ] = "true") |> Option.defaultValue regions[0]
+                    else regions |> Seq.tryFind (fun r -> not (isNull r) && String.Equals(str r [ "isDefault" ], "true", StringComparison.OrdinalIgnoreCase)) |> Option.defaultValue regions[0]
                 let baseUri = if isNull region then "https://uks.gssv-play-prodxhome.xboxlive.com" else (str region [ "baseUri" ]).TrimEnd('/')
                 let seconds = match Int32.TryParse(str node [ "durationInSeconds" ]) with | true, v -> v | _ -> 3600
                 let t = { Token = str node [ "gsToken" ]; BaseUri = baseUri; Until = DateTime.UtcNow.AddSeconds(float seconds) }
@@ -309,15 +337,42 @@ module XboxAuth =
                 return t
         }
 
+    /// Transfer token (lpt) needed when an xHome session enters ReadyToConnect (/connect).
+    let transferToken () =
+        task {
+            let s = match load () with Some s when s.Refresh <> "" -> s | _ -> failwith "not signed in"
+            let! res =
+                postForm "https://login.live.com/oauth20_token.srf"
+                    [ "client_id", appId; "grant_type", "refresh_token"; "refresh_token", s.Refresh
+                      "scope", "service::http://Passport.NET/purpose::PURPOSE_XBOX_CLOUD_CONSOLE_TRANSFER_TOKEN" ]
+            let refresh = str res [ "refresh_token" ]
+            if refresh <> "" && refresh <> s.Refresh then
+                store { s with Key = keyText (); Refresh = refresh }
+            let tok = match str res [ "lpt" ] with "" -> str res [ "access_token" ] | t -> t
+            if tok = "" then failwith "missing transfer token"
+            return tok
+        }
+
     /// The account's consoles, as the streaming service lists them.
     let consoles () =
         task {
-            let! t = streamToken ()
-            use request = new HttpRequestMessage(HttpMethod.Get, t.BaseUri + "/v6/servers/home")
-            request.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", t.Token)
-            let! response = http.SendAsync request
-            let! answer = response.Content.ReadAsStringAsync()
-            if not response.IsSuccessStatusCode then failwithf "servers: %d" (int response.StatusCode)
+            let fetchOnce () =
+                task {
+                    let! t = streamToken ()
+                    use request = new HttpRequestMessage(HttpMethod.Get, t.BaseUri + "/v6/servers/home")
+                    request.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", t.Token)
+                    request.Headers.TryAddWithoutValidation("X-Gssv-Client", "XboxComBrowser") |> ignore
+                    let! response = http.SendAsync request
+                    let! answer = response.Content.ReadAsStringAsync()
+                    return response.StatusCode, answer
+                }
+            let! (status0, answer0) = fetchOnce ()
+            let! (status, answer) =
+                if status0 = HttpStatusCode.Unauthorized then
+                    invalidateStream ()
+                    fetchOnce ()
+                else Task.FromResult(status0, answer0)
+            if int status < 200 || int status >= 300 then failwithf "servers: %d" (int status)
             let node = JsonNode.Parse answer
             return
                 match node["results"] with
@@ -325,7 +380,7 @@ module XboxAuth =
                     [ for c in list do
                         if not (isNull c) then
                             yield { ServerId = str c [ "serverId" ]; Name = str c [ "deviceName" ]; ConsoleType = str c [ "consoleType" ]
-                                    Power = str c [ "powerState" ]; OutOfHome = str c [ "outOfHomeWarning" ] = "true" } ]
+                                    Power = str c [ "powerState" ]; OutOfHome = String.Equals(str c [ "outOfHomeWarning" ], "true", StringComparison.OrdinalIgnoreCase) } ]
                 | _ -> []
         }
 
@@ -472,32 +527,190 @@ module XboxPlayer =
             found = 0n), 0n) |> ignore
         found
 
+    let private findBridgeExe () =
+        let candidates =
+            [ Path.Combine(AppContext.BaseDirectory, "Console", "mfgsm-console.exe")
+              (match Path.GetDirectoryName(folder.TrimEnd('\\', '/')) with
+               | null | "" -> ""
+               | parent -> Path.Combine(parent, "mfgsm-console.exe"))
+              Path.Combine(AppContext.BaseDirectory, "mfgsm-console.exe") ]
+        candidates |> List.tryFind (fun p -> p <> "" && File.Exists p)
+
+    /// Native Windows HID/XInput/WinMM controller bridge (mfgsm-console.exe pad-bridge) over /mfgsm/pad.
+    type PadBridge(onMenu: unit -> unit) =
+        let stdinLock = obj ()
+        let sockets = ConcurrentDictionary<WebSocket, SemaphoreSlim>()
+        let mutable proc: Process = null
+        let mutable latestPadJson = """{"connected":false}"""
+        let mutable stopped = 0
+
+        let sendFrame (ws: WebSocket) (gate: SemaphoreSlim) (json: string) =
+            task {
+                if Volatile.Read(&stopped) = 0 && ws.State = WebSocketState.Open then
+                    try
+                        do! gate.WaitAsync()
+                        try
+                            if Volatile.Read(&stopped) = 0 && ws.State = WebSocketState.Open then
+                                let bytes = Encoding.UTF8.GetBytes json
+                                do! ws.SendAsync(ArraySegment bytes, WebSocketMessageType.Text, true, CancellationToken.None)
+                        finally
+                            gate.Release() |> ignore
+                    with _ -> ()
+            }
+
+        let broadcast (json: string) =
+            latestPadJson <- json
+            for kv in sockets do
+                if kv.Key.State = WebSocketState.Open then
+                    sendFrame kv.Key kv.Value json |> ignore
+
+        let parseAndBroadcast (line: string) =
+            if line = "@menu" then onMenu ()
+            elif line.StartsWith "@pad " then
+                let p = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                if p.Length >= 10 then
+                    match Int32.TryParse p[1], Int32.TryParse p[2], UInt32.TryParse p[3], UInt32.TryParse p[4], UInt32.TryParse p[5],
+                          Int32.TryParse p[6], Int32.TryParse p[7], Int32.TryParse p[8], Int32.TryParse p[9] with
+                    | (true, conn), (true, kind), (true, mask), (true, lt), (true, rt), (true, lx), (true, ly), (true, rx), (true, ry) ->
+                        let json =
+                            sprintf """{"connected":%s,"kind":%d,"mask":%u,"lt":%u,"rt":%u,"lx":%d,"ly":%d,"rx":%d,"ry":%d}"""
+                                (if conn <> 0 then "true" else "false") kind mask lt rt lx ly rx ry
+                        broadcast json
+                    | _ -> ()
+
+        member _.HasProcess = not (isNull proc) && not proc.HasExited
+        member _.LatestJson = latestPadJson
+
+        member _.Start() =
+            if Volatile.Read(&stopped) = 0 && isNull proc then
+                match findBridgeExe () with
+                | None -> ()
+                | Some exe ->
+                    try
+                        let info = ProcessStartInfo(exe, "pad-bridge", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardInput = true, StandardOutputEncoding = Encoding.UTF8)
+                        let p = new Process(StartInfo = info, EnableRaisingEvents = true)
+                        p.OutputDataReceived.Add(fun args -> if not (isNull args.Data) then parseAndBroadcast (args.Data.Trim()))
+                        if p.Start() then
+                            proc <- p
+                            p.BeginOutputReadLine()
+                        else
+                            p.Dispose()
+                    with _ -> ()
+
+        member _.SendRumble(left: int, right: int) =
+            let l = Math.Clamp(left, 0, 255)
+            let r = Math.Clamp(right, 0, 255)
+            lock stdinLock (fun () ->
+                if not (isNull proc) && not proc.HasExited then
+                    try
+                        proc.StandardInput.WriteLine(sprintf "rumble %d %d" l r)
+                        proc.StandardInput.Flush()
+                    with _ -> ())
+
+        member this.AttachSocket(ws: WebSocket) =
+            task {
+                let gate = new SemaphoreSlim(1, 1)
+                sockets[ws] <- gate
+                try
+                    do! sendFrame ws gate latestPadJson
+                    let buf = Array.zeroCreate<byte> 1024
+                    use msg = new MemoryStream()
+                    while Volatile.Read(&stopped) = 0 && ws.State = WebSocketState.Open do
+                        let! res = ws.ReceiveAsync(ArraySegment buf, CancellationToken.None)
+                        if res.MessageType = WebSocketMessageType.Close then
+                            try do! ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None) with _ -> ()
+                        elif res.MessageType = WebSocketMessageType.Text && res.Count > 0 then
+                            msg.Write(buf, 0, res.Count)
+                            if res.EndOfMessage then
+                                let txt = Encoding.UTF8.GetString(msg.ToArray()).Trim()
+                                msg.SetLength 0L
+                                if txt.StartsWith "rumble " then
+                                    let parts = txt.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                                    if parts.Length >= 3 then
+                                        match Int32.TryParse parts[1], Int32.TryParse parts[2] with
+                                        | (true, l), (true, r) -> this.SendRumble(l, r)
+                                        | _ -> ()
+                with _ -> ()
+                let mutable dropped = Unchecked.defaultof<SemaphoreSlim>
+                sockets.TryRemove(ws, &dropped) |> ignore
+                try ws.Dispose() with _ -> ()
+            }
+
+        member _.Stop() =
+            if Interlocked.Exchange(&stopped, 1) = 0 then
+                for kv in sockets do
+                    try kv.Key.Abort() with _ -> ()
+                let p =
+                    lock stdinLock (fun () ->
+                        let cur = proc
+                        proc <- null
+                        if not (isNull cur) then
+                            try
+                                if not cur.HasExited then
+                                    cur.StandardInput.WriteLine "rumble 0 0"
+                                    cur.StandardInput.WriteLine "quit"
+                                    cur.StandardInput.Close()
+                            with _ -> ()
+                        cur)
+                if not (isNull p) then
+                    try
+                        if not (p.WaitForExit 400) && not p.HasExited then p.Kill true
+                    with _ -> ()
+                    try p.Dispose() with _ -> ()
+
     /// One stream: its window, the lines to send its page, and its end.
-    type Session(server: HttpListener, mark: string, onLine: string -> unit) =
+    type Session(server: HttpListener, mark: string, onLine: string -> unit) as this =
         let commands = ConcurrentQueue<string>()
         let waiting = new SemaphoreSlim(0)
         let ended = TaskCompletionSource()
+        let bridge = PadBridge(fun () -> this.OnLine "@menu")
         let mutable window = 0n
         let mutable connected = false
         let mutable told = false
+        let mutable lastMenuMs = -1000L
+        let mutable remoteSessionId = ""
+        let mutable remoteDeleted = 0
         // (Frame generation goes on the window once the picture is there - not on the page's "connecting".)
         let tellWindow () =
             if connected && window <> 0n && not told then
                 told <- true
                 onLine (sprintf "@window %d" (int64 window))
         member _.Mark = mark
-        member _.OnLine(line: string) =
-            if line = "@connected" then
-                connected <- true
-                tellWindow ()
-            onLine line
+        member _.Bridge = bridge
+        member _.HasBridge = bridge.HasProcess
+        member _.StartBridge() = bridge.Start()
+        member _.SetRemoteSession(id: string) =
+            if id <> "" && id <> remoteSessionId then
+                remoteSessionId <- id
+                Volatile.Write(&remoteDeleted, 0)
+        member _.MarkRemoteDeleted() = Volatile.Write(&remoteDeleted, 1)
+        member _.RemoteSessionToClean() =
+            if Interlocked.CompareExchange(&remoteDeleted, 1, 0) = 0 then remoteSessionId else ""
+        member this.OnLine(line: string) =
+            if line.StartsWith "@session " then
+                this.SetRemoteSession(line.Substring(9).Trim())
+            else
+                if line = "@connected" then
+                    connected <- true
+                    tellWindow ()
+                elif line = "@quit" then
+                    this.MarkRemoteDeleted()
+                if line = "@menu" then
+                    let now = Environment.TickCount64
+                    let prev = Volatile.Read(&lastMenuMs)
+                    if now - prev >= 400L && Interlocked.CompareExchange(&lastMenuMs, now, prev) = prev then
+                        onLine line
+                else
+                    onLine line
         member _.Window
             with get () = window
             and set v =
                 window <- v
                 tellWindow ()
         member _.Ended = ended.Task
-        member _.End() = ended.TrySetResult() |> ignore
+        member _.End() =
+            bridge.Stop()
+            ended.TrySetResult() |> ignore
         member _.Tell(line: string) = commands.Enqueue line; waiting.Release() |> ignore
         member _.Next(timeout: TimeSpan) =
             task {
@@ -520,7 +733,51 @@ module XboxPlayer =
     let mutable private port = 0
     let mutable private current: Session option = None
     let private http = new HttpClient(Timeout = TimeSpan.FromSeconds 30.0)
+    let private relaxedJson = JsonSerializerOptions(Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
     let private types = dict [ ".html", "text/html; charset=utf-8"; ".js", "text/javascript; charset=utf-8"; ".css", "text/css"; ".png", "image/png"; ".svg", "image/svg+xml" ]
+    let private debugLogPath = Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData, "MFG SUPER MOTION", "Console", "xbox-debug.log")
+    let private debugLogLock = obj ()
+    let mutable private debugLogBytes = 0
+    let private deleteCooldownLock = obj ()
+    let mutable private lastDeleteAt = DateTime.MinValue
+    let mutable private lastDeleteTask: Task = Task.CompletedTask
+    let private resetDebugLog (header: string) =
+        lock debugLogLock (fun () ->
+            try
+                Directory.CreateDirectory(Path.GetDirectoryName debugLogPath) |> ignore
+                File.WriteAllText(debugLogPath, header + "\r\n", Encoding.UTF8)
+                debugLogBytes <- header.Length + 2
+            with _ -> ())
+    let private appendDebugLog (line: string) =
+        if not (String.IsNullOrWhiteSpace line) then
+            lock debugLogLock (fun () ->
+                try
+                    if debugLogBytes < 65536 then
+                        let entry = sprintf "[%s] %s\r\n" (DateTime.Now.ToString("HH:mm:ss.fff")) (line.Trim())
+                        File.AppendAllText(debugLogPath, entry, Encoding.UTF8)
+                        debugLogBytes <- debugLogBytes + Encoding.UTF8.GetByteCount entry
+                with _ -> ())
+
+    let private noteDeleteTime () =
+        lock deleteCooldownLock (fun () -> lastDeleteAt <- DateTime.UtcNow)
+
+    let private deleteRemoteSession (id: string) =
+        if id <> "" then
+            let t =
+                task {
+                    try
+                        let! t = XboxAuth.streamToken ()
+                        use req = new HttpRequestMessage(HttpMethod.Delete, t.BaseUri + "/v5/sessions/home/" + Uri.EscapeDataString id)
+                        req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", t.Token)
+                        req.Headers.TryAddWithoutValidation("X-Gssv-Client", "XboxComBrowser") |> ignore
+                        let! _ = http.SendAsync req
+                        ()
+                    with _ -> ()
+                    noteDeleteTime ()
+                } :> Task
+            lock deleteCooldownLock (fun () ->
+                lastDeleteAt <- DateTime.UtcNow
+                lastDeleteTask <- t)
 
     let private reply (context: HttpListenerContext) (status: int) (contentType: string) (body: byte[]) =
         try
@@ -539,27 +796,89 @@ module XboxPlayer =
             try
                 if path.StartsWith "/v5/" || path.StartsWith "/v6/" then
                     // (The streaming service: passed on with the account's token, as xbox-xcloud-player's own server does.)
-                    let! t = XboxAuth.streamToken ()
-                    use out = new HttpRequestMessage(HttpMethod(request.HttpMethod), t.BaseUri + request.Url.PathAndQuery)
-                    out.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", t.Token)
-                    for h in [ "Accept"; "X-MS-Device-Info" ] do
-                        match request.Headers[h] with
-                        | null -> ()
-                        | v -> out.Headers.TryAddWithoutValidation(h, v) |> ignore
-                    if request.HasEntityBody then
-                        use r = new StreamReader(request.InputStream, Encoding.UTF8)
-                        let! body = r.ReadToEndAsync()
-                        out.Content <- new StringContent(body, Encoding.UTF8, "application/json")
-                    let! answer = http.SendAsync out
-                    let! bytes = answer.Content.ReadAsByteArrayAsync()
-                    let kind = match answer.Content.Headers.ContentType with null -> "application/json" | c -> c.ToString()
-                    reply context (int answer.StatusCode) kind bytes
+                    let isDelete = request.HttpMethod.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
+                    let isPlay = request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) && path.Equals("/v5/sessions/home/play", StringComparison.OrdinalIgnoreCase)
+                    if isDelete then
+                        current |> Option.iter (fun s -> s.MarkRemoteDeleted())
+                        noteDeleteTime ()
+                    if isPlay then
+                        let prevTask, deletedAt = lock deleteCooldownLock (fun () -> lastDeleteTask, lastDeleteAt)
+                        if not prevTask.IsCompleted then
+                            let! _ = Task.WhenAny(prevTask, Task.Delay 3000)
+                            ()
+                        let deletedAt = lock deleteCooldownLock (fun () -> lastDeleteAt)
+                        if deletedAt <> DateTime.MinValue then
+                            let elapsedMs = (DateTime.UtcNow - deletedAt).TotalMilliseconds
+                            if elapsedMs < 2000.0 then
+                                do! Task.Delay(int (2000.0 - elapsedMs))
+                    let isConnect = request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) && path.EndsWith("/connect", StringComparison.OrdinalIgnoreCase)
+                    let! rawBody =
+                        if not isConnect && request.HasEntityBody then
+                            use r = new StreamReader(request.InputStream, Encoding.UTF8)
+                            r.ReadToEndAsync()
+                        else Task.FromResult ""
+                    let! bodyText =
+                        if isConnect then
+                            task {
+                                let! lpt = XboxAuth.transferToken ()
+                                return JsonObject(dict [ "userToken", JsonValue.Create(lpt) :> JsonNode ]).ToJsonString(relaxedJson)
+                            }
+                        else Task.FromResult rawBody
+                    let hasBody = isConnect || request.HasEntityBody
+                    let forwardOnce () =
+                        task {
+                            let! t = XboxAuth.streamToken ()
+                            use out = new HttpRequestMessage(HttpMethod(request.HttpMethod), t.BaseUri + request.Url.PathAndQuery)
+                            out.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", t.Token)
+                            out.Headers.TryAddWithoutValidation("X-Gssv-Client", "XboxComBrowser") |> ignore
+                            for h in [ "Accept"; "X-MS-Device-Info" ] do
+                                match request.Headers[h] with
+                                | null -> ()
+                                | v -> out.Headers.TryAddWithoutValidation(h, v) |> ignore
+                            if hasBody then
+                                out.Content <- new StringContent(bodyText, Encoding.UTF8, "application/json")
+                            let! answer = http.SendAsync out
+                            let! bytes = answer.Content.ReadAsByteArrayAsync()
+                            let kind = match answer.Content.Headers.ContentType with null -> "application/json" | c -> c.ToString()
+                            return answer.StatusCode, kind, bytes
+                        }
+                    let! (status0, kind0, bytes0) = forwardOnce ()
+                    let! (status, kind, bytes) =
+                        if status0 = HttpStatusCode.Unauthorized then
+                            XboxAuth.invalidateStream ()
+                            forwardOnce ()
+                        else Task.FromResult(status0, kind0, bytes0)
+                    if isDelete then noteDeleteTime ()
+                    reply context (int status) kind bytes
+                elif path = "/mfgsm/pad" then
+                    if request.IsWebSocketRequest then
+                        try
+                            let! wsCtx = context.AcceptWebSocketAsync(null)
+                            match current with
+                            | Some s -> do! s.Bridge.AttachSocket wsCtx.WebSocket
+                            | None ->
+                                try
+                                    do! wsCtx.WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "no session", CancellationToken.None)
+                                    wsCtx.WebSocket.Dispose()
+                                with _ -> ()
+                        with _ -> ()
+                    else
+                        let body =
+                            match current with
+                            | Some s -> s.Bridge.LatestJson
+                            | None -> """{"connected":false}"""
+                        reply context 200 "application/json; charset=utf-8" (Encoding.UTF8.GetBytes body)
                 elif path = "/mfgsm/say" then
                     use r = new StreamReader(request.InputStream, Encoding.UTF8)
                     let! line = r.ReadToEndAsync()
                     match current with
                     | Some s -> s.OnLine(line.Trim())
                     | None -> ()
+                    reply context 204 "" [||]
+                elif path = "/mfgsm/log" then
+                    use r = new StreamReader(request.InputStream, Encoding.UTF8)
+                    let! line = r.ReadToEndAsync()
+                    appendDebugLog line
                     reply context 204 "" [||]
                 elif path = "/mfgsm/next" then
                     match current with
@@ -605,20 +924,30 @@ module XboxPlayer =
         let mark = "MFGSM-" + Guid.NewGuid().ToString("N").Substring(0, 8)
         let session = Session(server, mark, onLine)
         current <- Some session
+        session.StartBridge()
+        resetDebugLog (sprintf "=== Xbox session %s console=%s (%s, power=%s, away=%b) res=%d kbps=%d ===" (DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")) console.Name console.ConsoleType console.Power console.OutOfHome resolution bitrateKbps)
         let url =
             sprintf "http://127.0.0.1:%d/player.html?server=%s&res=%d&kbps=%d&name=%s&mark=%s" port (Uri.EscapeDataString console.ServerId) resolution bitrateKbps
                 (Uri.EscapeDataString console.Name) mark
-        match Edge.launch "edge-player" [ "--window-size=1280,760"; "--disable-session-crashed-bubble" ] url with
-        | None -> onLine "@error Microsoft Edge"; session.End(); session
+        match Edge.launch "edge-player" [ "--start-fullscreen"; "--disable-session-crashed-bubble" ] url with
+        | None ->
+            onLine "@error Microsoft Edge"
+            session.End()
+            if current = Some session then current <- None
+            session
         | Some _ ->
             task {
                 let until = DateTime.UtcNow.AddSeconds 30.0
                 while session.Window = 0n && DateTime.UtcNow < until do
                     session.Window <- findWindow mark
                     if session.Window = 0n then do! Task.Delay 250
-                if session.Window = 0n then onLine "@error window"; session.End()
+                if session.Window = 0n then
+                    onLine "@error window"
+                    deleteRemoteSession (session.RemoteSessionToClean())
+                    session.End()
                 else
                     while IsWindow session.Window do do! Task.Delay 500
+                    deleteRemoteSession (session.RemoteSessionToClean())
                     session.End()
                 if current = Some session then current <- None
             } |> ignore
@@ -630,15 +959,16 @@ module XboxPlayer =
     [<DllImport("xinput1_4.dll", EntryPoint = "#100")>]
     extern int private XInputGetStateEx(int user, PadState& state)
     let watchPad (session: Session) =
-        Task.Run(fun () ->
-            task {
-                let mutable held = false
-                while not session.Ended.IsCompleted do
-                    let mutable both = false
-                    for user in 0 .. 3 do
-                        let mutable s = Unchecked.defaultof<PadState>
-                        if (try XInputGetStateEx(user, &s) = 0 with _ -> false) && (s.Buttons &&& 0x0410us) = 0x0410us then both <- true
-                    if both && not held then session.OnLine "@menu"
-                    held <- both
-                    do! Task.Delay 33
-            } :> Task) |> ignore
+        if not session.HasBridge then
+            Task.Run(fun () ->
+                task {
+                    let mutable held = false
+                    while not session.Ended.IsCompleted do
+                        let mutable both = false
+                        for user in 0 .. 3 do
+                            let mutable s = Unchecked.defaultof<PadState>
+                            if (try XInputGetStateEx(user, &s) = 0 with _ -> false) && (s.Buttons &&& 0x0410us) = 0x0410us then both <- true
+                        if both && not held then session.OnLine "@menu"
+                        held <- both
+                        do! Task.Delay 33
+                } :> Task) |> ignore

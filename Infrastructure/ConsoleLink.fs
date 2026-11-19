@@ -4,6 +4,7 @@ open System
 open System.Net
 open System.Net.NetworkInformation
 open System.Net.Sockets
+open System.Runtime.InteropServices
 open System.Text
 open System.Threading.Tasks
 open System.IO
@@ -83,52 +84,83 @@ module ConsoleLink =
             Some { Kind = kind; Name = (match value "host-name" with "" -> string kind | n -> n); HostId = value "host-id"
                    Address = address; State = state; SystemVersion = value "system-version"; RequestPort = port }
 
-    /// The local networks' broadcast addresses (one a working IPv4 adapter), and the all-ones one.
-    let private broadcasts () =
-        let found =
+    /// Active non-loopback/non-tunnel IPv4 adapter addresses paired with their directed subnet broadcast.
+    let private adapterBroadcasts () =
+        try
             NetworkInterface.GetAllNetworkInterfaces()
-            |> Seq.filter (fun n -> n.OperationalStatus = OperationalStatus.Up && n.NetworkInterfaceType <> NetworkInterfaceType.Loopback)
+            |> Seq.filter (fun n ->
+                n.OperationalStatus = OperationalStatus.Up
+                && n.NetworkInterfaceType <> NetworkInterfaceType.Loopback
+                && n.NetworkInterfaceType <> NetworkInterfaceType.Tunnel)
             |> Seq.collect (fun n -> n.GetIPProperties().UnicastAddresses)
             |> Seq.filter (fun a -> a.Address.AddressFamily = AddressFamily.InterNetwork && not (isNull a.IPv4Mask))
             |> Seq.map (fun a ->
                 let ip = a.Address.GetAddressBytes()
                 let mask = a.IPv4Mask.GetAddressBytes()
-                IPAddress(Array.init 4 (fun i -> ip[i] ||| (~~~mask[i]))))
+                let bcast = IPAddress(Array.init 4 (fun i -> ip[i] ||| (~~~mask[i])))
+                a.Address, bcast)
             |> Seq.toList
-        IPAddress.Broadcast :: found |> List.distinct
+        with _ -> []
 
-    /// Every PlayStation that answers within `wait` (a console in rest mode answers too). Also asked directly: an
-    /// address the person typed (a console on another part of the network, where a broadcast does not reach).
+    /// Every PlayStation that answers within `wait` (a console in rest mode answers too). Binds one UDP socket per
+    /// active IPv4 adapter so virtual/VPN adapters (WSL, Hyper-V, VirtualBox) never steal broadcasts, plus an
+    /// unbound socket for any manually typed address.
     let discover (wait: TimeSpan) (direct: string list) : Task<ConsoleInfo list> =
         task {
-            use socket = new UdpClient(0)
-            socket.EnableBroadcast <- true
-            let targets =
-                [ for b in broadcasts () -> b ]
-                @ (direct |> List.choose (fun d -> match IPAddress.TryParse(d.Trim()) with | true, a -> Some a | _ -> None))
-            // (Twice, a moment apart: a console waking its network answers the second.)
-            for round in 0 .. 1 do
-                for kind, port, protocol in probes do
-                    let bytes = request protocol
-                    for target in targets do
-                        try socket.Send(bytes, bytes.Length, IPEndPoint(target, port)) |> ignore with _ -> ()
-                if round = 0 then do! Task.Delay 250
-            let found = Collections.Generic.Dictionary<string, ConsoleInfo>()
-            let until = DateTime.UtcNow + wait
-            while DateTime.UtcNow < until do
-                let left = until - DateTime.UtcNow
-                let receive = socket.ReceiveAsync()
-                let! finished = Task.WhenAny(receive, Task.Delay(max TimeSpan.Zero left))
-                if obj.ReferenceEquals(finished, receive) && receive.Status = TaskStatus.RanToCompletion then
-                    let answer = receive.Result
-                    let address = answer.RemoteEndPoint.Address.ToString()
-                    let kind = if answer.RemoteEndPoint.Port = 987 then PS4 else PS5
-                    match parseAnswer kind address (Encoding.ASCII.GetString answer.Buffer) with
-                    | Some console ->
-                        let key = if console.HostId <> "" then console.HostId else address
-                        found[key] <- console
-                    | None -> ()
-            return found.Values |> Seq.sortBy (fun c -> c.Name) |> Seq.toList
+            let listeners = ResizeArray<UdpClient * IPAddress list>()
+            try
+                for (localIp, bcastIp) in adapterBroadcasts () do
+                    try
+                        let u = new UdpClient(IPEndPoint(localIp, 0))
+                        u.EnableBroadcast <- true
+                        let targets = [ bcastIp; IPAddress.Broadcast ] |> List.distinct
+                        listeners.Add(u, targets)
+                    with _ -> ()
+                let directIps = direct |> List.choose (fun d -> match IPAddress.TryParse(d.Trim()) with | true, a -> Some a | _ -> None) |> List.distinct
+                if listeners.Count = 0 || not directIps.IsEmpty then
+                    try
+                        let u = new UdpClient(AddressFamily.InterNetwork)
+                        u.EnableBroadcast <- true
+                        let targets = (if listeners.Count = 0 then [ IPAddress.Broadcast ] else []) @ directIps |> List.distinct
+                        listeners.Add(u, targets)
+                    with _ -> ()
+
+                // Twice, a moment apart: a console waking its network answers the second.
+                for round in 0 .. 1 do
+                    for (_, port, protocol) in probes do
+                        let bytes = request protocol
+                        for (sock, targets) in listeners do
+                            for target in targets do
+                                try sock.Send(bytes, bytes.Length, IPEndPoint(target, port)) |> ignore with _ -> ()
+                    if round = 0 then do! Task.Delay 250
+
+                let found = Collections.Generic.Dictionary<string, ConsoleInfo>()
+                let gate = obj ()
+                let until = DateTime.UtcNow + wait
+                let receiveLoop (sock: UdpClient) =
+                    task {
+                        while DateTime.UtcNow < until do
+                            let left = until - DateTime.UtcNow
+                            if left > TimeSpan.Zero then
+                                try
+                                    let receive = sock.ReceiveAsync()
+                                    let! finished = Task.WhenAny(receive, Task.Delay left)
+                                    if obj.ReferenceEquals(finished, receive) && receive.Status = TaskStatus.RanToCompletion then
+                                        let answer = receive.Result
+                                        let address = answer.RemoteEndPoint.Address.ToString()
+                                        let kind = if answer.RemoteEndPoint.Port = 987 then PS4 else PS5
+                                        match parseAnswer kind address (Encoding.ASCII.GetString answer.Buffer) with
+                                        | Some console ->
+                                            let key = if console.HostId <> "" then console.HostId else address
+                                            lock gate (fun () -> found[key] <- console)
+                                        | None -> ()
+                                with _ -> ()
+                    }
+                do! Task.WhenAll([ for (sock, _) in listeners -> receiveLoop sock :> Task ])
+                return found.Values |> Seq.sortBy (fun c -> c.Name) |> Seq.toList
+            finally
+                for (sock, _) in listeners do
+                    try sock.Dispose() with _ -> ()
         }
 
     /// How this PC reaches its network: the adapter that holds the default way out (a gateway), cable or Wi-Fi.
@@ -152,6 +184,94 @@ module ConsoleLink =
                 | n :: _ -> { Kind = Cable; Adapter = n.Description; SpeedMbps = n.Speed / 1_000_000L }
                 | [] -> { Kind = NoLink; Adapter = ""; SpeedMbps = 0L }
         with _ -> { Kind = NoLink; Adapter = ""; SpeedMbps = 0L }
+
+/// Puts active Windows Wi-Fi adapters into low-latency media streaming mode (and 1 ms OS timer resolution) while a
+/// Console Link stream runs, suppressing periodic background SSID scans that cause packet-loss spikes; restored on end.
+module WifiStreaming =
+    [<DllImport("wlanapi.dll")>]
+    extern uint32 private WlanOpenHandle(uint32 dwClientVersion, IntPtr pReserved, uint32& pdwNegotiatedVersion, nativeint& phClientHandle)
+    [<DllImport("wlanapi.dll")>]
+    extern uint32 private WlanCloseHandle(nativeint hClientHandle, IntPtr pReserved)
+    [<DllImport("wlanapi.dll")>]
+    extern uint32 private WlanEnumInterfaces(nativeint hClientHandle, IntPtr pReserved, nativeint& ppInterfaceList)
+    [<DllImport("wlanapi.dll")>]
+    extern uint32 private WlanQueryInterface(nativeint hClientHandle, Guid& pInterfaceGuid, uint32 opCode, IntPtr pReserved, uint32& pdwDataSize, nativeint& ppData, uint32& pWlanOpcodeValueType)
+    [<DllImport("wlanapi.dll")>]
+    extern uint32 private WlanSetInterface(nativeint hClientHandle, Guid& pInterfaceGuid, uint32 opCode, uint32 dwDataSize, IntPtr pData, IntPtr pReserved)
+    [<DllImport("wlanapi.dll")>]
+    extern void private WlanFreeMemory(nativeint pMemory)
+    [<DllImport("winmm.dll")>]
+    extern uint32 private timeBeginPeriod(uint32 uPeriod)
+    [<DllImport("winmm.dll")>]
+    extern uint32 private timeEndPeriod(uint32 uPeriod)
+
+    let private gate = obj ()
+    let mutable private active = false
+    let mutable private wlanHandle = 0n
+    let private bgScanRestored = Collections.Generic.List<Guid>()
+
+    let enable () =
+        if OperatingSystem.IsWindows() then
+            lock gate (fun () ->
+                if not active then
+                    active <- true
+                    try timeBeginPeriod 1u |> ignore with _ -> ()
+                    try
+                        let mutable ver = 0u
+                        let mutable h = 0n
+                        if WlanOpenHandle(2u, IntPtr.Zero, &ver, &h) = 0u && h <> 0n then
+                            wlanHandle <- h
+                            let mutable listPtr = 0n
+                            if WlanEnumInterfaces(h, IntPtr.Zero, &listPtr) = 0u && listPtr <> 0n then
+                                let ptrOne = Marshal.AllocHGlobal 4
+                                let ptrZero = Marshal.AllocHGlobal 4
+                                try
+                                    Marshal.WriteInt32(ptrOne, 1)
+                                    Marshal.WriteInt32(ptrZero, 0)
+                                    let count = min 32 (max 0 (Marshal.ReadInt32(listPtr, 0)))
+                                    for i in 0 .. count - 1 do
+                                        // sizeof(WLAN_INTERFACE_INFO) = 532 bytes; InterfaceInfo[0] starts at byte offset 8.
+                                        let mutable guid = Marshal.PtrToStructure<Guid>(IntPtr.Add(listPtr, 8 + i * 532))
+                                        // Opcode 7 = wlan_intf_opcode_media_streaming_mode (stays active while handle is open).
+                                        WlanSetInterface(h, &guid, 7u, 4u, ptrOne, IntPtr.Zero) |> ignore
+                                        // Opcode 2 = wlan_intf_opcode_background_scan_enabled (best-effort; may require admin).
+                                        let mutable ds = 0u
+                                        let mutable dp = 0n
+                                        let mutable vt = 0u
+                                        if WlanQueryInterface(h, &guid, 2u, IntPtr.Zero, &ds, &dp, &vt) = 0u && dp <> 0n then
+                                            let bgVal = Marshal.ReadInt32 dp
+                                            WlanFreeMemory dp
+                                            if bgVal <> 0 && WlanSetInterface(h, &guid, 2u, 4u, ptrZero, IntPtr.Zero) = 0u then
+                                                bgScanRestored.Add guid
+                                finally
+                                    Marshal.FreeHGlobal ptrOne
+                                    Marshal.FreeHGlobal ptrZero
+                                    WlanFreeMemory listPtr
+                    with _ -> ())
+
+    let disable () =
+        if OperatingSystem.IsWindows() then
+            lock gate (fun () ->
+                if active then
+                    active <- false
+                    try
+                        if wlanHandle <> 0n then
+                            if bgScanRestored.Count > 0 then
+                                let ptrOne = Marshal.AllocHGlobal 4
+                                try
+                                    Marshal.WriteInt32(ptrOne, 1)
+                                    for guid in bgScanRestored do
+                                        let mutable g = guid
+                                        WlanSetInterface(wlanHandle, &g, 2u, 4u, ptrOne, IntPtr.Zero) |> ignore
+                                finally
+                                    bgScanRestored.Clear()
+                                    Marshal.FreeHGlobal ptrOne
+                            WlanCloseHandle(wlanHandle, IntPtr.Zero) |> ignore
+                            wlanHandle <- 0n
+                    with _ -> wlanHandle <- 0n
+                    try timeEndPeriod 1u |> ignore with _ -> ())
+
+    do AppDomain.CurrentDomain.ProcessExit.Add(fun _ -> disable ())
 
 /// The PSN account id a PS5's link needs (8 bytes, base64): the person signs in to their own PlayStation account on
 /// Sony's page, as PlayStation's own Remote Play app does (chiaki-ng's flow and its Remote Play client id); the page
@@ -190,8 +310,12 @@ module Psn =
                     use http = new Http.HttpClient(Timeout = TimeSpan.FromSeconds 20.0)
                     let basic = Convert.ToBase64String(Encoding.ASCII.GetBytes(clientId + ":" + clientSecret))
                     http.DefaultRequestHeaders.Authorization <- Http.Headers.AuthenticationHeaderValue("Basic", basic)
-                    let body = sprintf "grant_type=authorization_code&code=%s&scope=%s&redirect_uri=%s&" code scope redirect
-                    use content = new Http.StringContent(body, Encoding.UTF8, "application/x-www-form-urlencoded")
+                    use content =
+                        new Http.FormUrlEncodedContent([|
+                            Collections.Generic.KeyValuePair("grant_type", "authorization_code")
+                            Collections.Generic.KeyValuePair("code", code)
+                            Collections.Generic.KeyValuePair("scope", scope)
+                            Collections.Generic.KeyValuePair("redirect_uri", redirect) |])
                     let! answer = http.PostAsync(tokenUrl, content)
                     let! text = answer.Content.ReadAsStringAsync()
                     if not answer.IsSuccessStatusCode then return Error (sprintf "sign-in refused (%d)" (int answer.StatusCode))
@@ -252,13 +376,16 @@ module ConsolePlayer =
 
     /// The stream: its window and its lines (@window, @connected, @fg, @quality, @quit, @ended, @error ...).
     let stream (linked: LinkedConsole) (c: ConsoleOptions) (onLine: string -> unit) =
-        let heights = [| 720; 1080; 1440; 2160 |]
-        let widths = [| 1280; 1920; 2560; 3840 |]
+        let heights = [| 720; 1080 |]
+        let widths = [| 1280; 1920 |]
+        let res = min 1 (max 0 c.Resolution)
         let args =
             sprintf "stream %s %s %s %s %d %d %d %d %d %d %s %s" linked.Address (if linked.Ps5 then "ps5" else "ps4") linked.RegistKey (quote linked.Morning)
-                widths[c.Resolution] heights[c.Resolution] (if c.Fps = 0 then 30 else 60) c.Bitrate c.Codec c.Multiplier
+                widths[res] heights[res] (if c.Fps = 0 then 30 else 60) c.Bitrate c.Codec c.Multiplier
                 (quote c.Passcode) (quote linked.Name)
-        start args onLine
+        let p = start args onLine
+        WindowsPerformance.applyToProcess p Diagnostics.ProcessPriorityClass.AboveNormal
+        p
 
     /// One command to a running stream (quality r f b c | front | quit).
     let tell (p: Diagnostics.Process) (line: string) =

@@ -1210,8 +1210,9 @@ static void FgPresenter()
             std::unique_lock<std::mutex> lock(g_fg.mutex);
             // (Round 95: a pair shown by the beat whose real frame no beat fell on - `tail`: that frame is shown after
             // all when nothing follows within two beats of its time.)
+            const double tail_wait = smOpt.stream_dedup.load() != 0 ? std::max(2.0 * tail_beat, 0.055) : 2.0 * tail_beat;
             const auto patience = std::chrono::microseconds(!tail ? 250000LL :
-                std::clamp(static_cast<long long>((tail_moment + pace.delay + 2.0 * tail_beat - LatencyNow()) * 1e6), 500LL, 250000LL));
+                std::clamp(static_cast<long long>((tail_moment + pace.delay + tail_wait - LatencyNow()) * 1e6), 500LL, 250000LL));
             const bool ready = g_fg.wake.wait_for(lock, patience, [] {
                 if (g_fg.stop) return true;
                 for (auto &s : g_fg.slots) if (s.state == 2) return true;
@@ -1288,7 +1289,7 @@ static void FgPresenter()
         // real frame at once; the next pair was shown at the delay again, so that frame stood the delay longer than
         // any other: 57 - 63 ms on the screen after a pause, measured with every generator. The delay is the pipe's,
         // not the picture's: it is kept, and such a real frame is shown at its moment + the delay like any other.
-        const bool keep_beat = !chosen->interpolate && pace.delay > 0.0 && !dumped;
+        const bool keep_beat = (!chosen->interpolate || irregular) && pace.delay > 0.0 && !dumped;
         if (!chosen->interpolate && !keep_beat) pace.Forget();
         after_mark = chosen->mark;
         after_taken = chosen->taken;
@@ -2235,6 +2236,7 @@ static bool FgPresent(Pipeline &v, ID3D12Resource *color, D3D12_RESOURCE_STATES 
     }
     // Game FPS given in the app: the frames in between a pair are counted from it, not from the frames' times.
     if (interpolate && GivenFrameTime() > 0.0) every = GivenFrameTime();
+    if (interpolate && StreamMaxFrameTime() > 0.0 && every < StreamMaxFrameTime()) every = StreamMaxFrameTime();
     // Round 58, back in round 95 (the owner: "Lossless Scaling makes the game itself smoother; I do not want all these
     // oscillations in the frame time line"): a fixed multiplier at an even beat of its own (fixed_beat). Each pair had
     // the multiplier's count laid evenly over its own length, so every change of the game's frame time was shown, times

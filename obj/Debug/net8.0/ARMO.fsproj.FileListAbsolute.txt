@@ -808,3 +808,25 @@ C:\Users\ABDRAZEK\AppData\Local\Temp\armo-dlss5-check\Mfg Super Motion.deps.json
 C:\Users\ABDRAZEK\AppData\Local\Temp\armo-dlss5-check\Mfg Super Motion.runtimeconfig.json
 C:\Users\ABDRAZEK\AppData\Local\Temp\armo-dlss5-check\Mfg Super Motion.dll
 C:\Users\ABDRAZEK\AppData\Local\Temp\armo-dlss5-check\Mfg Super Motion.pdb
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\mfgsm-console.exe
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\avcodec-62.dll
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\avutil-60.dll
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\swresample-6.dll
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\licenses\chiaki-ng-COPYING.txt
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\licenses\FFmpeg-LICENSE.txt
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\xbox\player.html
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\xbox\player.js
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\xbox\xCloudPlayer.min.js
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Console\licenses\xbox-xcloud-player-LICENSE.txt
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\examples\FpsGraph\FpsGraph.cs
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\examples\FpsGraph\FpsGraph.csproj
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\examples\FpsGraph\mod.json
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\README.md
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\template\HelloMod\HelloMod.cs
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\template\HelloMod\HelloMod.csproj
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\ModKit\template\HelloMod\mod.json
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Mfg Super Motion.exe
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Mfg Super Motion.deps.json
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Mfg Super Motion.runtimeconfig.json
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Mfg Super Motion.dll
+C:\Users\ABDRAZEK\AppData\Local\Temp\armo_v112_verify\Mfg Super Motion.pdb

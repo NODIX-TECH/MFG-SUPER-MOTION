@@ -204,19 +204,56 @@ type MainWindow() as this =
                 heard <- model
                 model.Dlss5DllPickRequested.Add(fun () -> Dispatcher.UIThread.Post(fun () -> pickDlss5Dll model))
                 model.PresetCPicked.Add(fun () -> this.ShowWhatIs(model.Text.PresetPerformance, model.Text.PresetCWarning))
-                // Console Link: the stream's F1 / Guide + Start brings this window over the game, on its Console Link page
-                // (Super Motion's cards, every technique); "Back to the game" puts it behind again.
+                // Console Link: F1 / Guide + Start opens the compact floating Quick Menu over the stream window;
+                // "Back to the game" (or pressing F1/Esc again) closes it and refocuses the stream.
+                let mutable quickMenu: ConsoleQuickMenu option = None
+                let hideQuickMenu () =
+                    match quickMenu with
+                    | Some qm when qm.IsVisible -> qm.Hide()
+                    | _ -> ()
+                let openFullApp () =
+                    hideQuickMenu ()
+                    model.Navigate "console"
+                    if this.WindowState = WindowState.Minimized then this.WindowState <- WindowState.Normal
+                    this.Show()
+                    this.Topmost <- true
+                    this.Activate()
+                let backToGame () =
+                    hideQuickMenu ()
+                    if this.IsVisible && this.WindowState <> WindowState.Minimized && model.ConsoleLink.BackCommand.CanExecute(null) then
+                        model.ConsoleLink.BackCommand.Execute(null)
+                let ensureQuickMenu () =
+                    match quickMenu with
+                    | Some qm -> qm
+                    | None ->
+                        let qm = new ConsoleQuickMenu(model, backToGame, openFullApp)
+                        quickMenu <- Some qm
+                        qm
                 model.ConsoleLink.MenuRequested.Add(fun () ->
                     Dispatcher.UIThread.Post(fun () ->
-                        model.Navigate "console"
-                        if this.WindowState = WindowState.Minimized then this.WindowState <- WindowState.Normal
-                        this.Show()
-                        this.Topmost <- true
-                        this.Activate()))
+                        match quickMenu with
+                        | Some qm when qm.IsVisible ->
+                            qm.Hide()
+                        | _ ->
+                            let qm = ensureQuickMenu ()
+                            qm.Refresh()
+                            qm.ShowNoActivateOver(model.ConsoleLink.StreamWindowHandle, this)))
                 model.ConsoleLink.BackToGame.Add(fun () ->
                     Dispatcher.UIThread.Post(fun () ->
+                        hideQuickMenu ()
                         this.Topmost <- false
-                        this.WindowState <- WindowState.Minimized))
+                        if this.IsVisible && this.WindowState <> WindowState.Minimized then
+                            this.WindowState <- WindowState.Minimized))
+                model.ConsoleLink.StreamEnded.Add(fun () ->
+                    Dispatcher.UIThread.Post(fun () ->
+                        hideQuickMenu ()
+                        this.Topmost <- false))
+                this.Closing.Add(fun _ ->
+                    match quickMenu with
+                    | Some qm ->
+                        quickMenu <- None
+                        try qm.Close() with _ -> ()
+                    | None -> ())
             | _ -> ())
 
     // (Round 72: also a mod's ShowMessage - Views\ModHost.fs.)

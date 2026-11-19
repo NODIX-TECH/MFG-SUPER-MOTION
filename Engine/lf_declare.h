@@ -80,7 +80,6 @@ static bool LumaStart(UINT width, UINT height);
 static bool LumaFromPicture();
 static bool CaptureDeviceReady();
 static HMONITOR MonitorByName(const wchar_t *name);
-static IDXGIOutput *FindCaptureOutput(IDXGIAdapter1 *card, HMONITOR *elsewhere = nullptr);
 static bool DeskStart(UINT w, UINT hgt);
 static BridgeResult BridgeFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h,
                                       DXGI_FORMAT *out_format = nullptr);
@@ -109,6 +108,7 @@ static bool ShowHdr(Pipeline &v);
 static bool ShowFormatReady(bool hdr, bool pq = false);
 static void HdrRelease();
 static bool FgRequested();
+static int FgComputeCapability();
 // XeSS MFG, the second generator (xe_mfg.inl): asked by lf_dlssg.inl where NGX is asked for DLSS MFG.
 static bool XeStart();
 static bool XeReady(UINT w, UINT h, DXGI_FORMAT format);
@@ -180,6 +180,6 @@ static bool Dlss5Wanted();
 static void Dlss5WarmupStart();
 static bool Dlss5PrepareSession(UINT pic_w, UINT pic_h);
 static bool Dlss5HasSourceCopy();
-static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy = false);
+static bool Dlss5Run(Pipeline &pipe, bool reset, bool from_source_copy = false, bool wait_gpu = true);
 static bool Dlss5RestoreSource(Pipeline &pipe);
 static void Dlss5Close();

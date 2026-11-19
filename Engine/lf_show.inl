@@ -376,6 +376,13 @@ static void ShowStayOnTop()
     last_check = now;
     HWND top = GetTopWindow(0);
     if (top == nullptr || top == lfShow.hwnd) return;
+    const DWORD owner = smOpt.owner.load();
+    if (owner != 0)
+    {
+        DWORD top_pid = 0;
+        GetWindowThreadProcessId(top, &top_pid);
+        if (top_pid == owner) return;
+    }
     wchar_t cls[64];
 
     if (GetClassNameW(top, cls, 64) > 0
@@ -585,6 +592,8 @@ static float WindowCoverage(const RECT &target)
     if (area <= 0) return 0.0f;
     LONGLONG covered = 0;
     int guard = 0;
+    const bool console_mode = smOpt.stream_dedup.load() != 0;
+    const DWORD owner = console_mode ? smOpt.owner.load() : 0;
     for (HWND w = GetWindow(lfCap.window, GW_HWNDPREV); w != nullptr && guard < 512;
          w = GetWindow(w, GW_HWNDPREV), ++guard)
     {
@@ -600,7 +609,14 @@ static float WindowCoverage(const RECT &target)
             continue;
         RECT i = {};
         if (!IntersectRect(&i, &r, &target)) continue;
-        covered += static_cast<LONGLONG>(i.right - i.left) * static_cast<LONGLONG>(i.bottom - i.top);
+        const LONGLONG w_area = static_cast<LONGLONG>(i.right - i.left) * static_cast<LONGLONG>(i.bottom - i.top);
+        if (owner != 0)
+        {
+            DWORD w_pid = 0;
+            GetWindowThreadProcessId(w, &w_pid);
+            if (w_pid == owner && w_area * 100 < area * 45) continue;
+        }
+        covered += w_area;
         if (covered >= area) break;
     }
     return static_cast<float>(static_cast<double>(covered) / static_cast<double>(area));

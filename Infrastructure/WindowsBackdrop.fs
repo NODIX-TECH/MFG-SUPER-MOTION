@@ -1,6 +1,7 @@
 namespace ARMO.Infrastructure
 
 open System
+open System.Diagnostics
 open System.Runtime.InteropServices
 
 /// Windows owns the frame, caption buttons and backdrop. The UI keeps software rendering.
@@ -73,3 +74,41 @@ module WindowsBackdrop =
             let mutable margins = Margins(if enabled then -1 else 0)
             let extended = DwmExtendFrameIntoClientArea(handle, &margins) = 0
             result = 0 && extended && enabled
+
+/// Keeps the app, its engine and Console Link players out of Windows' EcoQoS efficiency throttling and sets
+/// high scheduling priority with boost enabled (without forcing GPU preferences that can break hybrid-GPU DXGI).
+module WindowsPerformance =
+    [<Struct; StructLayout(LayoutKind.Sequential)>]
+    type private PowerThrottlingState =
+        val Version: uint32
+        val ControlMask: uint32
+        val StateMask: uint32
+        new(controlMask) = { Version = 1u; ControlMask = controlMask; StateMask = 0u }
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool private SetProcessInformation(nativeint hProcess, int processInformationClass, PowerThrottlingState& processInformation, uint32 processInformationSize)
+
+    let disableThrottling (handle: nativeint) =
+        if OperatingSystem.IsWindows() && handle <> 0n then
+            try
+                let size = uint32 (Marshal.SizeOf<PowerThrottlingState>())
+                // Separate calls: 0x1 (EXECUTION_SPEED) works on Win10+ and Win11;
+                // 0x4 (IGNORE_TIMER_RESOLUTION) works on Win11 22H2+ (no-op if combined fails on Win10).
+                let mutable execOff = PowerThrottlingState 0x1u
+                SetProcessInformation(handle, 4, &execOff, size) |> ignore
+                let mutable timerOff = PowerThrottlingState 0x4u
+                SetProcessInformation(handle, 4, &timerOff, size) |> ignore
+            with _ -> ()
+
+    let applyToProcess (p: Process) (priority: ProcessPriorityClass) =
+        if OperatingSystem.IsWindows() && not (isNull p) then
+            try p.PriorityClass <- priority with _ -> ()
+            try p.PriorityBoostEnabled <- true with _ -> ()
+            try disableThrottling p.Handle with _ -> ()
+
+    let applyToCurrent () =
+        if OperatingSystem.IsWindows() then
+            try
+                use p = Process.GetCurrentProcess()
+                applyToProcess p ProcessPriorityClass.High
+            with _ -> ()
