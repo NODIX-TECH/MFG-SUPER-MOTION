@@ -1,0 +1,74 @@
+name: Security Scan (CodeQL, Gitleaks, Binary Detector)
+
+on:
+  push:
+    branches: [main, 'chore/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    name: CodeQL Analysis
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['cpp', 'csharp']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+        continue-on-error: true
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  gitleaks:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  opaque-binary-detector:
+    name: Opaque Binary Detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Report tracked binary artifacts
+        run: |
+          echo "Scanning repository for tracked binary files..."
+          git ls-files | grep -iE '\.(exe|dll|rar|zip|7z|obj|lib|pdb|so|dylib|bin|sys)$' || echo "No tracked binaries found."
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ADDED_BINS=$(git diff --name-only --diff-filter=AM origin/${{ github.base_ref }}...HEAD | grep -iE '\.(exe|dll|rar|zip|7z|obj|lib|pdb|so|dylib|bin|sys)$' || true)
+            if [ -n "$ADDED_BINS" ]; then
+              echo "ERROR: New or modified opaque binaries detected in PR:"
+              echo "$ADDED_BINS"
+              exit 1
+            fi
+          fi

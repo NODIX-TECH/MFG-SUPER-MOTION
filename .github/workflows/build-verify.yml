@@ -1,0 +1,81 @@
+name: Clean Windows Build, SHA-256 & ClamAV Verify
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build native C++ engine (clean runner, no packers)
+        shell: cmd
+        run: |
+          call Engine\build.cmd out
+
+      - name: Build and publish F# AvaloniaUI app
+        shell: pwsh
+        run: |
+          dotnet restore ARMO.fsproj -r win-x64
+          dotnet publish ARMO.fsproj -c Release -r win-x64 --self-contained false -p:MakeInstaller=false -p:MakeLinux=false -o publish-win-x64
+
+      - name: Verify no UPX / packer signatures and generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path publish-win-x64 -Recurse -File | Where-Object { $_.Extension -in '.exe','.dll' }
+          $sums = @()
+          foreach ($f in $files) {
+            $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+            $ascii = [System.Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min($bytes.Length, 4096))
+            if ($ascii -match 'UPX0|UPX1|UPX!|Themida|VMProtect') {
+              throw "Packer signature detected in $($f.Name)"
+            }
+            $h = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $rel = $f.FullName.Substring((Resolve-Path publish-win-x64).Path.Length + 1).Replace('\', '/')
+            $sums += "$h  $rel"
+          }
+          $sums | Out-File -FilePath publish-win-x64\SHA256SUMS.txt -Encoding ascii
+          Get-Content publish-win-x64\SHA256SUMS.txt | Select-Object -First 20
+
+      - name: Upload verified build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mfg-super-motion-win-x64
+          path: publish-win-x64/
+          retention-days: 14
+
+  clamav-scan:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download compiled artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mfg-super-motion-win-x64
+          path: artifacts
+
+      - name: Install ClamAV and update definitions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clamav clamav-daemon
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam
+
+      - name: Scan compiled artifacts with ClamAV
+        run: |
+          clamscan -r --infected --no-summary artifacts/
