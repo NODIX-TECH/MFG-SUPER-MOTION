@@ -5,7 +5,7 @@
 Do not open public GitHub issues for security vulnerabilities.
 
 Report vulnerabilities privately through GitHub Security Advisories:
-https://github.com/magnocat/MFG-SUPER-MOTION/security/advisories/new
+https://github.com/NODIX-TECH/MFG-SUPER-MOTION/security/advisories/new
 
 Include in your report:
 1. Affected component (`Engine/`, `Infrastructure/`, `ViewModels/`, or release artifact).
