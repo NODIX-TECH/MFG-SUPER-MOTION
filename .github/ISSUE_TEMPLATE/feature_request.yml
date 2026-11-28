@@ -1,0 +1,32 @@
+name: Feature Request
+description: Propose a technical enhancement with clear hardware or API justification.
+title: "[Feature]: "
+labels: ["triage", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check existing open and closed issues before submitting a feature request.
+  - type: checkboxes
+    id: duplicate_check
+    attributes:
+      label: Pre-submission Checks
+      options:
+        - label: I searched existing issues and pull requests and confirmed this is not a duplicate.
+          required: true
+        - label: I verified this request aligns with the PolyForm Strict License 1.0.0 scope.
+          required: true
+  - type: textarea
+    id: justification
+    attributes:
+      label: Technical Justification
+      description: Explain the exact use case, affected GPU architectures (including non-Tensor Core GPUs such as GTX 1060 or Intel iGPUs), and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: Proposed Architecture / API Notes
+      description: Specify affected components (UI, DXGI/WGC capture, Vulkan layer, Console Link) without altering core engine safety invariants.
+    validations:
+      required: false

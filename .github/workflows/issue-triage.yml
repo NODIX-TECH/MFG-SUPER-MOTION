@@ -1,0 +1,103 @@
+name: Issue Triage and FAQ Auto-Response
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate completeness and answer recurring questions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = (issue.title || '').toLowerCase();
+            const body = issue.body || '';
+            const lowerBody = body.toLowerCase();
+            const isBug = (issue.labels || []).some(l => l.name === 'bug') || title.startsWith('[bug]');
+
+            // 1. Check for incomplete bug reports
+            if (isBug) {
+              const requiredSections = [
+                'App Version',
+                'Operating System',
+                'Exact GPU Model',
+                'Frame Generation / Upscaling Engine',
+                'Game Graphics API',
+                'Capture Method',
+                'Engine / Application Log Attachment'
+              ];
+              const missing = requiredSections.filter(s => !body.includes(`### ${s}`));
+              if (missing.length > 0 || body.trim().length < 80) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['incomplete', 'invalid']
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: [
+                    'This issue was closed automatically because required diagnostic fields are missing.',
+                    '',
+                    'Please open a new issue using the **Bug Report** template and provide: App Version, OS, Exact GPU, Engine, Game API, Capture Method, and Log.'
+                  ].join('\n')
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                  state_reason: 'not_planned'
+                });
+                return;
+              }
+            }
+
+            // 2. Auto-reply to recurring questions (console, Linux, dual-GPU)
+            const replies = [];
+            const labels = [];
+
+            if (/\b(ps4|ps5|xbox|console link|remote play|chiaki)\b/i.test(title + ' ' + body)) {
+              labels.push('console-link');
+              replies.push('- **Console Link (PS4/PS5/Xbox)**: Ensure your console and PC are on the same LAN (wired Ethernet recommended), Remote Play / Remote Features are enabled on the console, and review the [README](https://github.com/magnocat/MFG-SUPER-MOTION/blob/main/README.md).');
+            }
+
+            if (/\b(linux|wayland|x11|vulkan layer|steam deck|proton)\b/i.test(title + ' ' + body)) {
+              labels.push('linux');
+              replies.push('- **Linux Support**: Verify that the Vulkan layer (`libmfgsm_vk.so`) is built and present in `layer/`. See the [README](https://github.com/magnocat/MFG-SUPER-MOTION/blob/main/README.md) for X11/Wayland notes.');
+            }
+
+            if (/\b(dual[- ]?gpu|hybrid|laptop|igpu|optimus|mux|two gpus|intel uhd|gtx 1060)\b/i.test(title + ' ' + body)) {
+              labels.push('dual-gpu');
+              replies.push('- **Dual-GPU / Hybrid Laptop & Non-Tensor GPUs**: Select your target GPU explicitly in Settings. Non-Tensor Core GPUs (such as GTX 1060 and Intel iGPUs) must use `SMFG`, `SMAI`, or `SMT` instead of `DLSS`. See [AGENTS.md](https://github.com/magnocat/MFG-SUPER-MOTION/blob/main/AGENTS.md) and [README.md](https://github.com/magnocat/MFG-SUPER-MOTION/blob/main/README.md).');
+            }
+
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels
+              });
+            }
+
+            if (replies.length > 0 && context.payload.action === 'opened') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  'Automated documentation pointers related to your report:',
+                  '',
+                  ...replies
+                ].join('\n')
+              });
+            }

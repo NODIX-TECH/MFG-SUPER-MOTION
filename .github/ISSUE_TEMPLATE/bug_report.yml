@@ -1,0 +1,81 @@
+name: Bug Report
+description: Report a reproducible bug in MFG SUPER MOTION.
+title: "[Bug]: "
+labels: ["triage", "bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Complete every required field below. Incomplete bug reports or generic AI-generated issues are closed automatically.
+  - type: input
+    id: app_version
+    attributes:
+      label: App Version
+      description: Version shown in Settings > About or release tag.
+      placeholder: "e.g. 1.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - Linux (X11)
+        - Linux (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Exact GPU Model
+      description: Include both GPUs if using a dual-GPU or hybrid laptop setup.
+      placeholder: "e.g. NVIDIA GTX 1060 6GB / Intel UHD 730"
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Frame Generation / Upscaling Engine
+      options:
+        - SMFG
+        - SMAI
+        - SMT
+        - DLSS
+        - XeSS
+    validations:
+      required: true
+  - type: dropdown
+    id: game_api
+    attributes:
+      label: Game Graphics API
+      options:
+        - DX11
+        - DX12
+        - Vulkan
+    validations:
+      required: true
+  - type: dropdown
+    id: capture_method
+    attributes:
+      label: Capture Method
+      options:
+        - WGC (Windows.Graphics.Capture)
+        - DXGI (Desktop Duplication)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Steps to Reproduce and Actual Behavior
+      description: Describe exact steps, game title, and observed issue.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Engine / Application Log Attachment
+      description: Paste relevant lines or attach your Engine log file (`%LocalAppData%\MFG SUPER MOTION\`).
+    validations:
+      required: true

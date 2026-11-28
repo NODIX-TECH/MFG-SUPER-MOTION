@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/NODIX-TECH/MFG-SUPER-MOTION/security/advisories/new
+    about: Report security vulnerabilities privately instead of opening a public issue.
+  - name: Documentation and FAQ
+    url: https://github.com/NODIX-TECH/MFG-SUPER-MOTION/blob/main/README.md
+    about: Read setup instructions, supported GPUs, Linux layer notes, and Console Link details.
